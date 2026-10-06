@@ -11,6 +11,13 @@ export type MemberId =
   | 'rodo'
 /** The languages the screen and the characters' voices come in. */
 export type Lang = 'en' | 'ko' | 'ja'
+/**
+ * Words the mode says, in every language, made when they were said: the
+ * screen shows the ones of the language it is in just then. Words that are
+ * someone else's (a task's title, what a tool is on, a report) are the same
+ * in each.
+ */
+export type Phrase = Record<Lang, string>
 /** The languages kept from one session to the next: the one the person chose, and the one their prompts were last typed in. */
 export type LangKept = { chosen?: Lang; typed?: Lang }
 /** A role as the mode keeps it, whatever the language of the screen: the screen has its own word for each. */
@@ -40,22 +47,25 @@ export type Task = {
   role: Role
   /** The subagent type, or the fleet-run profile. */
   engine: string
+  /** What whoever handed the task over called it. */
   title: string
+  /** The title in each language, where the mode named the task itself: a demonstration's. */
+  titles?: Phrase
   status: TaskStatus
   startedAt: number
   endedAt?: number
   tool?: string
   /** What the tool is on: a file's name, a command's start. */
   detail?: string
-  /** The first line of what the character handed back, once it has. */
-  report?: string
-  /** The first few lines of it, for the one who asks to see the task. */
+  /** The first line of what the character handed back, once it has: as it was written, but for a sound or a gesture of the character's own, which is as each language has it. */
+  report?: Phrase
+  /** The first few lines of it, for the one who asks to see the task, as they were written: the first is the report. */
   summary?: string[]
   toolCount: number
   /** A line or a gesture the wiki records for the character; a gesture is in parentheses. */
-  quote: string
+  quote: Phrase
   /** What the line is about, in plain words. */
-  note: string
+  note: Phrase
   mood: Mood
   isSlow?: boolean
   /** An Orca worker's result file, once known. */
@@ -73,15 +83,16 @@ export type Task = {
 
 /** A hand lent to the main loop's own work: what it is on, when, and when its character last said so. */
 export type Aid = {
-  what: string
+  what: Phrase
   /** The same in a word or two, for a cut with little room. */
-  brief?: string
+  brief?: Phrase
   at: number
   saidAt: number
 }
 export type Aids = Partial<Record<MemberId, Aid>>
 
-export type Said = { member: MemberId; quote: string; note: string; at: number; mood: Mood }
+/** A line of the conversation: who said it, the words and what they are about in each language, when, and with what face. */
+export type Said = { member: MemberId; quote: Phrase; note: Phrase; at: number; mood: Mood }
 
 export type Limit = {
   /** `five_hour`, `seven_day`, or a gateway's `spend_limit`. */

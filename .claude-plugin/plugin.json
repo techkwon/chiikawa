@@ -1,6 +1,6 @@
 {
   "name": "chiikawa",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Chiikawa mode: Hachiware conducts, and the friends from Chiikawa appear as text drawings to take on tasks and talk them over (Claude subagents + Orca workers). In English, Korean and Japanese.",
   "author": { "name": "techkwon" },
   "license": "MIT",

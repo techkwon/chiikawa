@@ -1,17 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, Elements, EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Aids, Lang, MemberId, Role, Roles, Said, Task, Tokens, Usage, WorkRole } from '../types'
+import type { Aids, Lang, MemberId, Phrase, Role, Roles, Said, Task, Tokens, Usage, WorkRole } from '../types'
 
 import type { Situation } from './cast'
-import { CAST, isActive, jobOf, LEAD, MEMBERS, MOODS, pickMember, PROFILES, readingOf, roleOf, roleOfAgent, rolesFrom, say, shown, specialistOf, toneOf, withRole, WORK_ROLES, WORKERS } from './cast'
+import { CAST, isActive, jobOf, LEAD, MEMBERS, MOODS, pickMember, PROFILES, readingOf, reported, roleOf, roleOfAgent, rolesFrom, say, shown, specialistOf, titleOf, toneOf, withRole, WORK_ROLES, WORKERS } from './cast'
 import type { FleetRun } from './orca'
 import { findFleetRuns, readMeta, voicedSpecPath } from './orca'
 import type { Kit, Scene } from './view'
 import { AID_MS, drawBand, drawPane, lastSaid, plus, rosterLines, talkLines, usageLines, ZERO } from './view'
 import { castIn, firstLines, fleetNote, isMarked, leaderSection, memberBlock, memberNamed, namedMember, orcaBlock, pickNote, roleNamed, roleNote, standDown, tookNote, unvoiced } from './voice'
 import type { LangFrom, Words } from './words'
-import { isSaid, LANG_NAMES, langKeptFrom, langNamed, LANGS, configLang, localeLang, typedLang, WORDS } from './words'
+import { asIs, inAll, isSaid, LANG_NAMES, langKeptFrom, langNamed, LANGS, configLang, localeLang, typedLang, WORDS } from './words'
 
 const PANE = 'chiikawa'
 const TICK_MS = 2000
@@ -78,16 +78,18 @@ const ROLES_KEPT = 'roles'
 const LANG_KEPT = 'lang'
 
 type Engine = EngineInterface
-type Draft = Pick<Task, 'id' | 'kind' | 'role' | 'engine' | 'title'> & Pick<Task, 'out' | 'call' | 'due' | 'staleAt'>
-/** A line of the conversation before it has its moment: who, on what occasion, the words, what they are about. */
-type Line = readonly [member: MemberId, situation: Situation, quote: string, note: string]
+type Draft = Pick<Task, 'id' | 'kind' | 'role' | 'engine' | 'title'> & Pick<Task, 'titles' | 'out' | 'call' | 'due' | 'staleAt'>
+/** A line of the conversation before it has its moment: who, on what occasion, and in each language the words and what they are about. */
+type Line = readonly [member: MemberId, situation: Situation, quote: Phrase, note: Phrase]
 /** How a task ended. */
 type Outcome = {
   isOk: boolean
-  why?: string
+  /** Why it ended so, as a language says it. */
+  why?: (words: Words) => string
   tokens?: Tokens
-  report?: string
-  /** The first lines of what it handed back. */
+  /** What the mode itself has it hand back, where no worker wrote anything: a demonstration's. */
+  report?: Phrase
+  /** The first lines of what it handed back: the first is its report. */
   summary?: string[]
   /** Read off the engine's list, not told by the task's own turn. */
   isGuessed?: boolean
@@ -99,17 +101,35 @@ let langWanted: Lang | 'auto' = 'auto'
 /** The language the screen and the voices are in just now. */
 const langOf = async ($: Engine): Promise<Lang> => (langWanted === 'auto' ? read($, lang) : langWanted)
 
+/**
+ * Words the session holds, in each language. A session under way when the
+ * mode was loaded again may still hold them as the one text they were said
+ * in: that text then stands in every language.
+ */
+const phraseOf = (held: Phrase | string): Phrase => (typeof held === 'string' ? asIs(held) : held)
+
+/** The conversation so far, each line with its words in each language. */
+const talkOf = async ($: Engine): Promise<Said[]> => (await read($, feed)).map(said => ({ ...said, quote: phraseOf(said.quote), note: phraseOf(said.note) }))
+
+/** The tasks, each with its words in each language. */
+const tasksOf = async ($: Engine): Promise<Task[]> =>
+  (await read($, tasks)).map(task => ({ ...task, quote: phraseOf(task.quote), note: phraseOf(task.note), ...(task.report === undefined ? {} : { report: phraseOf(task.report) }) }))
+
+/** The hands lent, each with its words in each language. */
+const aidsOf = async ($: Engine): Promise<Aids> =>
+  Object.fromEntries(Object.entries(await read($, aids)).map(([id, aid]) => [id, { ...aid, what: phraseOf(aid.what), ...(aid.brief === undefined ? {} : { brief: phraseOf(aid.brief) }) }]))
+
 const sceneOf = async ($: Engine): Promise<Scene> => ({
   lang: await langOf($),
-  tasks: await read($, tasks),
+  tasks: await tasksOf($),
   now: await read($, clockNow),
   waveAt: await read($, waveAt),
   usage: await read($, usage),
   leaderTokens: await read($, leaderTokens),
-  feed: await read($, feed),
+  feed: await talkOf($),
   picked: await read($, picked),
   watched: await read($, watched),
-  aids: await read($, aids),
+  aids: await aidsOf($),
   isUsageOpen: await read($, isUsageOpen),
   talkBack: await read($, talkBack),
   isTalkOnly: await read($, isTalkOnly),
@@ -253,6 +273,13 @@ const tell = async ($: Engine, now: number, lines: readonly Line[]): Promise<num
   return last
 }
 
+/** One of a character's own lines for the occasion, in each language: one turn is the same place of the same occasion in each. */
+const lineOf = (member: MemberId, situation: Situation, turn: number): Phrase => inAll(lang => say(lang, member, situation, turn))
+
+/** How 하치와레 reads what a friend just did, in each language; nothing where he has nothing to read. */
+const readOf = (member: MemberId, situation: 'start' | 'done' | 'fail', role: Role): Phrase | undefined =>
+  LANGS.some(lang => readingOf(lang, member, situation, role) === undefined) ? undefined : inAll(lang => readingOf(lang, member, situation, role) ?? '')
+
 /** What a tool call is on, in a few words: the file's name, the command's start. */
 const detailOf = (input: object): string => {
   const { file_path: file, path, command, pattern, query, url, description } = input as Record<string, unknown>
@@ -298,12 +325,9 @@ const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise
   inTurn(async () => {
     const now = await $.clock.now()
     const given = await read($, roles)
-    const spoke = await langOf($)
-    const words = WORDS[spoke]
-    const cast = CAST[spoke]
     const { out, staleAt: _staleAt, ...unread } = draft
     const box: { task: Task; isWaveStart: boolean; busy: number; gone: Task[] } = {
-      task: { ...draft, member: 'shisa', status: 'running', startedAt: now, toolCount: 0, quote: '', note: '', mood: 'calm' },
+      task: { ...draft, member: 'shisa', status: 'running', startedAt: now, toolCount: 0, quote: asIs(''), note: asIs(''), mood: 'calm' },
       isWaveStart: false,
       busy: 0,
       gone: [],
@@ -318,7 +342,16 @@ const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise
 
       box.isWaveStart = !list.some(isActive)
       box.busy = new Set([...list.filter(isActive).map(task => task.member), member]).size
-      box.task = { ...(isShared ? unread : draft), member, status: 'running', startedAt: now, toolCount: 0, quote: say(spoke, member, 'start', turn), note: words.started(cast.job[draft.role], draft.title), mood: 'calm' }
+      box.task = {
+        ...(isShared ? unread : draft),
+        member,
+        status: 'running',
+        startedAt: now,
+        toolCount: 0,
+        quote: lineOf(member, 'start', turn),
+        note: inAll(lang => WORDS[lang].started(CAST[lang].job[draft.role], titleOf(lang, draft))),
+        mood: 'calm',
+      }
       const next = kept([...list.filter(task => task.id !== draft.id), box.task])
 
       box.gone = list.filter(task => task.id !== draft.id && !next.includes(task))
@@ -328,28 +361,28 @@ const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise
     await owe($, box.gone)
 
     const { task } = box
-    const reading = readingOf(spoke, task.member, 'start', task.role)
+    const reading = readOf(task.member, 'start', task.role)
 
     isBusy = true
     const lines: Line[] = []
 
     if (box.isWaveStart) {
       await update($, waveAt, () => now)
-      lines.push(['rodo', 'start', say(spoke, 'rodo', 'start', 0), words.bellNote])
+      lines.push(['rodo', 'start', lineOf('rodo', 'start', 0), inAll(lang => WORDS[lang].bellNote)])
     }
     lines.push([task.member, 'start', task.quote, task.note])
-    if (reading !== undefined) lines.push([LEAD, 'start', reading, words.reading(cast.names[task.member])])
+    if (reading !== undefined) lines.push([LEAD, 'start', reading, inAll(lang => WORDS[lang].reading(CAST[lang].names[task.member]))])
     if (box.busy === 2) {
       const since = await read($, waveAt)
 
       // 노동 갑옷 씨 remarks on two friends at work at once, once a wave.
-      if (!(await read($, feed)).some(said => said.at >= since && isSaid(one => one.paired, said.note))) lines.push(['rodo', 'done', say(spoke, 'rodo', 'done', 0), words.paired])
+      if (!(await talkOf($)).some(said => said.at >= since && isSaid(one => one.paired, said.note))) lines.push(['rodo', 'done', lineOf('rodo', 'done', 0), inAll(lang => WORDS[lang].paired)])
     }
     await stamp($, await tell($, now, lines))
     if (box.isWaveStart && isAutoOpening && !(await read($, isPaneOpen)) && !(await read($, isPaneDismissed))) {
       // Unasked, so the surface seats it only where there is width to spare;
       // where it does not, the band above the prompt carries the conversation.
-      void $.ui.open({ id: PANE, title: words.brand, closeOnEscape: true, ...PANE_SIZE }).then(
+      void $.ui.open({ id: PANE, title: WORDS[await langOf($)].brand, closeOnEscape: true, ...PANE_SIZE }).then(
         opened => (opened.isPlaced ? update($, isPaneOpen, () => true) : undefined),
         () => undefined,
       )
@@ -370,23 +403,24 @@ const lend = ($: Engine, tool: string, detail: string): Promise<void> =>
     const wanted: MemberId | undefined = SEEK.has(tool) ? 'usagi' : MEND.has(tool) ? 'chiikawa' : undefined
     const helper = wanted !== undefined && !(await read($, tasks)).some(task => task.member === wanted && isActive(task)) ? wanted : undefined
     const on = detail === '' ? '' : ` · ${detail}`
-    const spoke = await langOf($)
-    const words = WORDS[spoke]
-    const cast = CAST[spoke]
-    const verb = helper === 'usagi' ? words.seeking : words.mending
+    const verb = (lang: Lang): string => (helper === 'usagi' ? WORDS[lang].seeking : WORDS[lang].mending)
+    const doing = inAll(lang => `${verb(lang)}${on}`)
     const box = { isDue: false }
 
     await update($, aids, was => {
       const next: Aids = {
         ...was,
-        [LEAD]: helper === undefined ? { what: `${tool}${on}`, at: now, saidAt: now } : { what: `${words.lending(cast.names[helper], verb)}${on}`, brief: words.withFriend(cast.names[helper]), at: now, saidAt: now },
+        [LEAD]:
+          helper === undefined
+            ? { what: asIs(`${tool}${on}`), at: now, saidAt: now }
+            : { what: inAll(lang => `${WORDS[lang].lending(CAST[lang].names[helper], verb(lang))}${on}`), brief: inAll(lang => WORDS[lang].withFriend(CAST[lang].names[helper])), at: now, saidAt: now },
       }
 
       if (helper !== undefined) {
         const last = was[helper]?.saidAt
 
         box.isDue = last === undefined || now - last >= AID_SAY_MS
-        next[helper] = { what: `${verb}${on}`, at: now, saidAt: box.isDue || last === undefined ? now : last }
+        next[helper] = { what: doing, at: now, saidAt: box.isDue || last === undefined ? now : last }
       }
 
       return next
@@ -394,8 +428,8 @@ const lend = ($: Engine, tool: string, detail: string): Promise<void> =>
     isBusy = true
     if (helper === undefined || !box.isDue) return stamp($, now)
     const lines: Line[] = [
-      [helper, 'start', say(spoke, helper, 'start', Math.floor(now / AID_SAY_MS)), `${verb}${on}`],
-      [LEAD, 'start', cast.means(helper === 'usagi' ? cast.read.seeking : cast.read.mending), words.reading(cast.names[helper])],
+      [helper, 'start', lineOf(helper, 'start', Math.floor(now / AID_SAY_MS)), doing],
+      [LEAD, 'start', inAll(lang => CAST[lang].means(helper === 'usagi' ? CAST[lang].read.seeking : CAST[lang].read.mending)), inAll(lang => WORDS[lang].reading(CAST[lang].names[helper]))],
     ]
 
     await stamp($, await tell($, now, lines))
@@ -416,21 +450,29 @@ const gainOf = (task: Task, tokens: Tokens | undefined): Tokens | undefined => {
   return plus(tokens, { fresh: -was.fresh, cached: -was.cached, out: -was.out, usd: was.usd === undefined ? undefined : -was.usd })
 }
 
+/**
+ * What a task has handed back, with an end's word of it in: what the mode
+ * itself has it hand back, else the first line the worker wrote, a sound or
+ * a gesture of the character's own as each language has it, else what it had.
+ */
+const toldOf = (task: Task, { report, summary }: Outcome): Phrase | undefined => report ?? (summary?.[0] === undefined ? task.report : reported(task.member, summary[0]))
+
 /** The task as it stands once ended that way: the character's line for it, how long it took, what it handed back. */
-const endOf = (spoke: Lang, task: Task, { isOk, why = '', tokens, report = '', summary, isGuessed = false }: Outcome, now: number): Task => {
+const endOf = (task: Task, outcome: Outcome, now: number): Task => {
   const { tool: _tool, detail: _detail, isGuessed: _isGuessed, ...rest } = task
+  const { isOk, why, tokens, summary, isGuessed = false } = outcome
   const situation = isOk ? 'done' : 'fail'
   const endedAt = task.endedAt ?? now
   const cost = costOf(task, tokens)
-  const told = report === '' ? task.report : report
+  const told = toldOf(task, outcome)
 
   return {
     ...rest,
     status: isOk ? 'done' : 'failed',
     endedAt,
     // A check that passed is an O of the hand, whatever the turn.
-    quote: say(spoke, task.member, situation, task.role === '검토' ? 0 : task.toolCount + task.title.length),
-    note: [WORDS[spoke].ended(CAST[spoke].job[task.role], isOk), WORDS[spoke].spoken(endedAt - task.startedAt), why].filter(part => part !== '').join(' · '),
+    quote: lineOf(task.member, situation, task.role === '검토' ? 0 : task.toolCount + task.title.length),
+    note: inAll(lang => [WORDS[lang].ended(CAST[lang].job[task.role], isOk), WORDS[lang].spoken(endedAt - task.startedAt), why?.(WORDS[lang]) ?? ''].filter(part => part !== '').join(' · ')),
     mood: MOODS[situation],
     ...(cost === undefined ? {} : { tokens: cost }),
     ...(told === undefined ? {} : { report: told }),
@@ -450,9 +492,6 @@ const endOf = (spoke: Lang, task: Task, { isOk, why = '', tokens, report = '', s
 const settle = ($: Engine, id: string, outcome: Outcome): Promise<void> =>
   inTurn(async () => {
     const now = await $.clock.now()
-    const spoke = await langOf($)
-    const words = WORDS[spoke]
-    const cast = CAST[spoke]
     const box: { ended?: Task; all: Task[]; gain?: readonly [MemberId, Tokens] } = { all: [] }
 
     await update($, tasks, list => {
@@ -462,12 +501,12 @@ const settle = ($: Engine, id: string, outcome: Outcome): Promise<void> =>
         if (task.id !== id) return task
         const gain = gainOf(task, outcome.tokens)
         const cost = costOf(task, outcome.tokens)
-        const told = outcome.report === undefined || outcome.report === '' ? task.report : outcome.report
+        const told = toldOf(task, outcome)
         const lines = outcome.summary === undefined || outcome.summary.length === 0 ? task.summary : outcome.summary
         // A task at work is ended, and one ended on a guess is ended again as it really went; any other only gains what it cost and handed back.
         const next =
           isActive(task) || (task.isGuessed === true && outcome.isGuessed !== true)
-            ? endOf(spoke, task, outcome, now)
+            ? endOf(task, outcome, now)
             : { ...task, ...(cost === undefined ? {} : { tokens: cost }), ...(told === undefined ? {} : { report: told }), ...(lines === undefined ? {} : { summary: lines }) }
 
         if (isActive(task) || next.status !== task.status) box.ended = next
@@ -487,23 +526,24 @@ const settle = ($: Engine, id: string, outcome: Outcome): Promise<void> =>
     const { ended } = box
 
     if (ended === undefined || !(await read($, isOn))) return
-    const name = cast.names[ended.member]
+    // A toast is read once and gone: it is in the language of the moment.
+    const spoke = await langOf($)
     const isOk = ended.status === 'done'
     const situation = isOk ? 'done' : 'fail'
-    const reading = readingOf(spoke, ended.member, situation, ended.role)
+    const reading = readOf(ended.member, situation, ended.role)
     const lines: Line[] = [[ended.member, situation, ended.quote, ended.note]]
-    const toasts = [`${MEMBERS[ended.member].mark} ${name} ${shown(ended.quote)} ${ended.note}`]
+    const toasts = [`${MEMBERS[ended.member].mark} ${CAST[spoke].names[ended.member]} ${shown(ended.quote[spoke])} ${ended.note[spoke]}`]
 
-    if (reading !== undefined) lines.push([LEAD, situation, reading, isOk ? words.reading(name) : words.mourning(name)])
+    if (reading !== undefined) lines.push([LEAD, situation, reading, inAll(lang => (isOk ? WORDS[lang].reading : WORDS[lang].mourning)(CAST[lang].names[ended.member]))])
     if (!box.all.some(isActive)) {
       const since = await read($, waveAt)
       const wave = box.all.filter(task => task.startedAt >= since)
       const failed = wave.filter(task => task.status === 'failed').length
-      const quote = failed > 0 ? cast.leader.cheer : wave.length >= 2 ? cast.leader.sweep : cast.leader.allDone
-      const note = failed > 0 ? words.waveFailed(wave.length, failed) : words.waveDone(wave.length)
+      const quote = inAll(lang => (failed > 0 ? CAST[lang].leader.cheer : wave.length >= 2 ? CAST[lang].leader.sweep : CAST[lang].leader.allDone))
+      const note = inAll(lang => (failed > 0 ? WORDS[lang].waveFailed(wave.length, failed) : WORDS[lang].waveDone(wave.length)))
 
       lines.push([LEAD, failed > 0 ? 'fail' : 'done', quote, note])
-      if (wave.length >= 2) toasts.push(`${MEMBERS[LEAD].mark} ${cast.names[LEAD]} “${quote}” ${note}`)
+      if (wave.length >= 2) toasts.push(`${MEMBERS[LEAD].mark} ${CAST[spoke].names[LEAD]} “${quote[spoke]}” ${note[spoke]}`)
     }
     await stamp($, await tell($, now, lines))
     for (const toast of toasts) $.ui.toast(toast)
@@ -624,6 +664,9 @@ const touch = async ($: Engine, agentId: string, tool: string, detail: string): 
   )
 }
 
+/** Why a subagent's turn ended short of an answer, as a language says it. */
+const ENDS: Readonly<Record<string, (words: Words) => string>> = { aborted: words => words.stopped, error: words => words.apiError, refusal: words => words.refused }
+
 const tokensOf = (spent: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }): Tokens => ({
   fresh: spent.input_tokens + spent.cache_creation_input_tokens,
   cached: spent.cache_read_input_tokens,
@@ -662,12 +705,14 @@ const pollWorker = async ($: Engine, task: Task): Promise<void> => {
   const at = await writtenAt($, path)
 
   if (at === undefined || at < task.startedAt - 1000 || at === task.staleAt) return
-  const meta = readMeta(await $.fs.read(path).catch(() => ''), WORDS[await langOf($)])
+  const text = await $.fs.read(path).catch(() => '')
+  // How it went and what it cost are the same in any language; how long it took and how it exited are said again as each says them.
+  const meta = readMeta(text, WORDS.en)
 
   if (meta === undefined) return
   const summary = firstLines(await $.fs.read(task.out).catch(() => ''), SUMMARY_LINES)
 
-  await settle($, task.id, { isOk: meta.isOk, why: meta.note, tokens: meta.tokens, report: summary[0] ?? '', summary })
+  await settle($, task.id, { isOk: meta.isOk, why: words => readMeta(text, words)?.note ?? '', tokens: meta.tokens, summary })
 }
 
 /**
@@ -721,19 +766,18 @@ const letGo = ($: Engine, id: string, now: number, why: (words: Words) => (name:
 
     // Turned off, the mode lets it go all the same, and says nothing of it.
     if (gone === undefined || !(await read($, isOn))) return
-    const spoke = await langOf($)
 
-    await stamp($, await tell($, now, [['rodo', 'slow', say(spoke, 'rodo', 'slow', 0), why(WORDS[spoke])(CAST[spoke].names[gone.member], gone.title)]]))
+    await stamp($, await tell($, now, [['rodo', 'slow', lineOf('rodo', 'slow', 0), inAll(lang => why(WORDS[lang])(CAST[lang].names[gone.member], titleOf(lang, gone)))]]))
   })
 
 /** One beat of an Orca worker: a demonstration ends when it is due, a real one when its result has landed. */
 const checkWorker = async ($: Engine, task: Task, now: number): Promise<void> => {
   if (task.due !== undefined) {
     const { at, isOk } = task.due
-    const words = WORDS[await langOf($)]
+    // A demonstration's title opens with the word for one, in every language.
+    const report = inAll(lang => WORDS[lang].demoReport(titleOf(lang, task).replace(/^[^:]+: /, '')))
 
-    // A demonstration's title opens with the word for one, whichever language it was started in.
-    if (now >= at) await settle($, task.id, { isOk, why: words.demo, report: isOk ? words.demoReport(task.title.replace(/^[^:]+: /, '')) : '' })
+    if (now >= at) await settle($, task.id, { isOk, why: words => words.demo, ...(isOk ? { report } : {}) })
 
     return
   }
@@ -743,7 +787,7 @@ const checkWorker = async ($: Engine, task: Task, now: number): Promise<void> =>
   // Its end cannot be learned with no result file to watch, and is not coming after two hours with none: it is let go.
   if (now - task.startedAt > (task.out === undefined ? LOST_MS : LOST_MS * 2)) return letGo($, task.id, now, words => words.letGo)
   if (task.out !== undefined && task.status === 'running' && now - task.startedAt > LOST_MS) {
-    const note = WORDS[await langOf($)].noResult
+    const note = inAll(lang => WORDS[lang].noResult)
 
     await update($, tasks, list => list.map(one => (one.id === task.id && isActive(one) ? { ...one, status: 'waiting' as const, note } : one)))
   }
@@ -762,12 +806,11 @@ const unlisted = new Map<string, number>()
 /** One beat of a subagent: what the engine's list says of it is what the task shows. */
 const checkAgent = async ($: Engine, task: Task, agents: readonly AgentInfo[], now: number): Promise<void> => {
   const info = agents.find(agent => agent.id === task.id)
-  const words = WORDS[await langOf($)]
 
   if (info !== undefined) {
     unlisted.delete(task.id)
     if (info.status === 'completed') await settle($, task.id, { isOk: true, isGuessed: true })
-    else if (info.status === 'failed' || info.status === 'killed') await settle($, task.id, { isOk: false, why: info.status === 'killed' ? words.stopped : '', isGuessed: true })
+    else if (info.status === 'failed' || info.status === 'killed') await settle($, task.id, { isOk: false, ...(info.status === 'killed' ? { why: words => words.stopped } : {}), isGuessed: true })
     else if ((info.status === 'waiting') !== (task.status === 'waiting')) {
       const status = info.status === 'waiting' ? ('waiting' as const) : ('running' as const)
 
@@ -794,15 +837,12 @@ const checkAgent = async ($: Engine, task: Task, agents: readonly AgentInfo[], n
   // The engine lists an agent until it drops its task: one it has not listed
   // for a while has ended, and its turn's end did not reach this hook.
   unlisted.delete(task.id)
-  await settle($, task.id, { isOk: true, why: words.unseen, isGuessed: true })
+  await settle($, task.id, { isOk: true, why: words => words.unseen, isGuessed: true })
 }
 
 /** A task three minutes on: its character says so, once, and 모몽가 with nothing to do grumbles at the wait. */
 const nudge = async ($: Engine, id: string, now: number): Promise<void> => {
   const box: { slow?: Task; isMomongaBusy: boolean } = { isMomongaBusy: false }
-  const spoke = await langOf($)
-  const words = WORDS[spoke]
-  const cast = CAST[spoke]
 
   await update($, tasks, list => {
     box.slow = undefined
@@ -810,7 +850,7 @@ const nudge = async ($: Engine, id: string, now: number): Promise<void> => {
 
     return list.map(one => {
       if (one.id !== id || !isActive(one) || one.isSlow === true || now - one.startedAt < SLOW_MS) return one
-      box.slow = { ...one, isSlow: true, quote: say(spoke, one.member, 'slow', 0), note: words.keeping(cast.job[one.role], words.spoken(now - one.startedAt)), mood: MOODS.slow }
+      box.slow = { ...one, isSlow: true, quote: lineOf(one.member, 'slow', 0), note: inAll(lang => WORDS[lang].keeping(CAST[lang].job[one.role], WORDS[lang].spoken(now - one.startedAt))), mood: MOODS.slow }
 
       return box.slow
     })
@@ -821,7 +861,7 @@ const nudge = async ($: Engine, id: string, now: number): Promise<void> => {
   if (slow === undefined) return
   const lines: Line[] = [[slow.member, 'slow', slow.quote, slow.note]]
 
-  if (!box.isMomongaBusy) lines.push(['momonga', 'slow', say(spoke, 'momonga', 'slow', 0), words.waitingFor(cast.names[slow.member], words.spoken(now - slow.startedAt))])
+  if (!box.isMomongaBusy) lines.push(['momonga', 'slow', lineOf('momonga', 'slow', 0), inAll(lang => WORDS[lang].waitingFor(CAST[lang].names[slow.member], WORDS[lang].spoken(now - slow.startedAt)))])
   await tell($, now, lines)
 }
 
@@ -1276,7 +1316,8 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
 
       for (const [index, [role, member, ms, isOk]] of DEMO.entries()) {
-        await reserve($, { id: `orca:demo:${index}`, kind: 'orca', role, engine: said.demo, title: said.demoTitles[index] ?? said.demo, due: { at: now + ms, isOk } }, member)
+        // The mode names these itself: each has its title in every language, and the screen its own word for what runs it.
+        await reserve($, { id: `orca:demo:${index}`, kind: 'orca', role, engine: said.demo, title: said.demoTitles[index] ?? said.demo, titles: inAll(lang => WORDS[lang].demoTitles[index] ?? WORDS[lang].demo), due: { at: now + ms, isOk } }, member)
       }
 
       return { text: said.demoStarted }
@@ -1497,28 +1538,26 @@ export const register: Register = (on, options) => {
       }
 
       const isFailed = ran.isError === true
-      const spoke = await langOf($)
-      const words = WORDS[spoke]
 
       for (const { task, run, isShared } of made) {
         // Each launch by what hands it on, its own `&`, an Orca terminal or `nohup` around it: another launch of the same command is waited for all the same.
         const isAway = run.isBackground || run.isDetached || e.run_in_background === true
         // With no result file to read its end from: one another worker has, or one whose path could not be read.
-        const unread = task.out !== undefined ? undefined : isShared ? words.sharedOut : run.hasOut ? words.unseen : undefined
+        const unread = task.out !== undefined ? undefined : isShared ? (words: Words) => words.sharedOut : run.hasOut ? (words: Words) => words.unseen : undefined
 
         if (task.out !== undefined) await pollWorker($, task).catch(() => undefined)
         // A launch that answered an error has failed. Handed on, its worker may be running all the same: that end is a guess, and the result is still looked for.
-        if (isFailed) await settle($, task.id, isAway ? { isOk: false, why: words.launchFailed, isGuessed: true } : { isOk: false }).catch(() => undefined)
+        if (isFailed) await settle($, task.id, isAway ? { isOk: false, why: words => words.launchFailed, isGuessed: true } : { isOk: false }).catch(() => undefined)
         else if (!isAway) await settle($, task.id, { isOk: true, ...(unread === undefined ? {} : { why: unread }) }).catch(() => undefined)
         else if (task.out === undefined) {
-          const note = isShared ? words.sharedOut : words.noPath
+          const note = inAll(lang => (isShared ? WORDS[lang].sharedOut : WORDS[lang].noPath))
 
           await update($, tasks, list => list.map(one => (one.id === task.id && isActive(one) ? { ...one, status: 'waiting' as const, note } : one))).catch(() => undefined)
         }
       }
       // Turned off while the command ran, the mode adds no word of its own to the result.
       if (!(await read($, isOn).catch(() => false))) return ran
-
+      const spoke = await langOf($)
       const lines = made.map(({ task, voiced, isUncopied }) => fleetNote(spoke, task.member, task.role, task.engine, task.title, voiced, isUncopied))
 
       return { ...ran, context: [...(ran.context ?? []), ...lines] }
@@ -1530,11 +1569,9 @@ export const register: Register = (on, options) => {
       const task = (await read($, tasks)).find(one => one.id === e.agentId)
 
       if (task !== undefined) {
-        const spoke = await langOf($)
-
         await tell($, await $.clock.now(), [
-          [task.member, 'denied', say(spoke, task.member, 'denied', 0), WORDS[spoke].denied(e.tool)],
-          ['rodo', 'denied', say(spoke, 'rodo', 'denied', 0), WORDS[spoke].watching(CAST[spoke].names[task.member], e.tool)],
+          [task.member, 'denied', lineOf(task.member, 'denied', 0), inAll(lang => WORDS[lang].denied(e.tool))],
+          ['rodo', 'denied', lineOf('rodo', 'denied', 0), inAll(lang => WORDS[lang].watching(CAST[lang].names[task.member], e.tool))],
         ])
       }
     }
@@ -1553,11 +1590,9 @@ export const register: Register = (on, options) => {
     const spent = e.usage === undefined ? undefined : tokensOf(e.usage)
 
     if (e.agentId !== undefined) {
-      const words = WORDS[await langOf($)]
-      const why = e.reason === 'aborted' ? words.stopped : e.reason === 'error' ? words.apiError : e.reason === 'refusal' ? words.refused : ''
-      const summary = firstLines(e.answer, SUMMARY_LINES)
+      const why = ENDS[e.reason]
 
-      await finish($, e.agentId, e.turnId, { isOk: e.reason === 'answer', why, tokens: spent, report: summary[0] ?? '', summary }).catch(() => undefined)
+      await finish($, e.agentId, e.turnId, { isOk: e.reason === 'answer', ...(why === undefined ? {} : { why }), tokens: spent, summary: firstLines(e.answer, SUMMARY_LINES) }).catch(() => undefined)
     } else if (await read($, isOn).catch(() => false)) {
       if (spent !== undefined) await update($, leaderTokens, total => plus(total, spent))
       await refreshUsage($).catch(() => undefined)

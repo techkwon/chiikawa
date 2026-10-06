@@ -1,11 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Situation } from '../hooks/cast'
-import { CAST, isGesture, MEMBERS, ORDER, readingOf, say, shortName, soundsOf, specialistOf, roleOfAgent, WORK_ROLES, WORKERS } from '../hooks/cast'
+import { CAST, isGesture, MEMBERS, ORDER, readingOf, reported, say, shortName, soundsOf, specialistOf, roleOfAgent, WORK_ROLES, WORKERS } from '../hooks/cast'
 import { RENDERED } from '../hooks/cast.en'
 import { cells, fit, fitEnd, pad } from '../hooks/view'
 import { firstLines, fleetNote, isMarked, leaderSection, MARKS, memberBlock, memberNamed, namedMember, orcaBlock, pickNote, roleNamed, roleNote, standDown, tookNote, unvoiced } from '../hooks/voice'
-import { LANGS, langKeptFrom, langNamed, localeLang, typedLang, WORDS } from '../hooks/words'
+import { asIs, LANGS, langKeptFrom, langNamed, localeLang, typedLang, WORDS } from '../hooks/words'
 import type { Lang } from '../types'
 
 const SITUATIONS: readonly Situation[] = ['idle', 'start', 'done', 'fail', 'slow', 'denied']
@@ -132,6 +132,21 @@ test('a line on the screen is one the character has in its list, in every langua
   expect(CAST.ko.leader.found).toBe('있구나~. 이런 곳에도.')
   expect(CAST.ja.leader.found).toBe('それって "ここにあった" ってコト!?')
   expect(CAST.en.leader.found).toBe('So that means "it was here"?!')
+})
+
+test('the Korean screen has no Japanese letters in its own words or its cast, but for the three lines the cast keeps as the comic writes them', () => {
+  /** Every text held in a table, however deep; what a function would make is not among them. */
+  const texts = (held: unknown): string[] => (typeof held === 'string' ? [held] : typeof held === 'object' && held !== null ? Object.values(held).flatMap(texts) : [])
+  const japanese = (text: string): boolean => /[\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Han}]/u.test(text)
+  // A voice's list is for the model, and names each line's original beside it: it is not on the screen.
+  const { lines, ...cast } = CAST.ko
+
+  expect(lines.shisa.some(japanese)).toBe(true)
+  // 시사's two words of the Miyako language, and the 古本 of the bookseller's banner.
+  expect(texts(cast).filter(japanese)).toEqual(['んみゃーち', 'たんでぃがーたんでぃ', '(古本 표지판을 세운다)'])
+  expect(texts(WORDS.ko).filter(japanese)).toEqual([])
+  expect(WORDS.ko.on).toBe('켜짐')
+  expect(WORDS.ko.off).toBe('꺼짐')
 })
 
 test('a gesture is a gesture in every language, at the same place', () => {
@@ -370,6 +385,67 @@ test("a silent character's opening sound is skipped in the language its block wa
   expect(firstLines('🐹 Chiikawa: All the tests pass.\nNothing else changed.', 3)).toEqual(['All the tests pass.', 'Nothing else changed.'])
   expect(firstLines('🦦 ラッコ: いつもの\n直した。', 3)).toEqual(['いつもの', '直した。'])
   expect(firstLines('🦦 Rakko: The usual.\nFixed.', 3)).toEqual(['The usual.', 'Fixed.'])
+})
+
+test("a report's first line is shown as another language has it only where a friend who cannot talk wrote one of its own sounds or gestures, and that language surely has the same one", () => {
+  expect(reported('kani', '(blushes happily)')).toEqual({ en: '(blushes happily)', ko: '(볼에 빗금을 띄우며 기뻐한다)', ja: '(頬を染めて喜ぶ)' })
+  // Written without its parentheses, a gesture is known by what it tells, and is shown without them.
+  expect(reported('kani', '頬を染めて喜ぶ')).toEqual({ en: 'blushes happily', ko: '볼에 빗금을 띄우며 기뻐한다', ja: '頬を染めて喜ぶ' })
+  expect(reported('usagi', '우라')).toEqual({ en: 'Ura!', ko: '우라', ja: 'ウラ' })
+  expect(reported('usagi', 'Haa?')).toEqual({ en: 'Haa?', ko: '하아?', ja: 'ハァ？' })
+  expect(reported('chiikawa', '싫어~.')).toEqual({ en: 'Nooo!', ko: '싫어~.', ja: 'ヤダーッ' })
+  expect(reported('kurimanju', 'ハーッ…')).toEqual({ en: 'Haaah…', ko: '하―앗…', ja: 'ハーッ…' })
+  // English and Japanese are one line at every place; Korean shows the line as written where it has none that is surely the same.
+  expect(reported('chiikawa', 'Yaa!!')).toEqual({ en: 'Yaa!!', ko: 'Yaa!!', ja: 'ヤーッ!!' })
+  expect(reported('usagi', 'プルャ')).toEqual({ en: 'Purya!', ko: 'プルャ', ja: 'プルャ' })
+  expect(reported('chiikawa', '(hums a tune)')).toEqual({ en: '(hums a tune)', ko: '(hums a tune)', ja: '(鼻歌をうたう)' })
+  // A Korean line with no Japanese one that is surely the same stays as written in all three, though the two share an occasion.
+  for (const [id, line] of [['chiikawa', '나도!'], ['chiikawa', '와아……'], ['chiikawa', '얌빰빰 루빠루빠'], ['usagi', '푸랴!'], ['usagi', '하? 하아?']] as const) expect(reported(id, line)).toEqual(asIs(line))
+  // Anything else is the worker's own writing: a sentence, a sound drawn out, a gesture with more after it, a line of a friend who talks.
+  for (const [id, line] of [['kani', 'Sorted the notes.'], ['usagi', 'Uraaa!'], ['kani', '(blushes happily) Done.'], ['rakko', 'The usual.'], ['shisa', 'うれシーサー']] as const) expect(reported(id, line)).toEqual(asIs(line))
+
+  for (const id of ORDER.filter(one => !MEMBERS[one].speaks)) {
+    const places = SITUATIONS.flatMap(situation => CAST.ja.quotes[id][situation].map((ja, at) => ({ ja, en: CAST.en.quotes[id][situation][at], ko: CAST.ko.quotes[id][situation][at] })))
+
+    for (const { ja, en } of places) {
+      const shown = reported(id, ja)
+
+      // The English is the line at the same place, and comes back to the Japanese.
+      expect(`${id} ${ja} ${shown.en}`).toBe(`${id} ${ja} ${en ?? ''}`)
+      expect(`${id} ${ja} ${reported(id, shown.en).ja}`).toBe(`${id} ${ja} ${ja}`)
+      // The Korean, where there is one, stands at a place the Japanese line stands at, is a gesture where that is one, and comes back to it.
+      if (shown.ko !== ja) {
+        expect(`${id} ${ja} ${shown.ko} ${String(places.some(place => place.ja === ja && place.ko === shown.ko))}`).toBe(`${id} ${ja} ${shown.ko} true`)
+        expect(`${id} ${ja} ${String(isGesture(shown.ko))}`).toBe(`${id} ${ja} ${String(isGesture(ja))}`)
+        expect(reported(id, shown.ko)).toEqual(shown)
+      }
+    }
+  }
+  // The pairs of Korean and Japanese that are held to be one line, each checked by hand: no more of them than these.
+  expect(ORDER.flatMap(id => (MEMBERS[id].speaks ? [] : [...new Set(SITUATIONS.flatMap(situation => CAST.ja.quotes[id][situation]))].flatMap(ja => (reported(id, ja).ko === ja ? [] : [`${reported(id, ja).ko} = ${ja}`]))))).toEqual([
+    '후!! = フ！',
+    '와… 아… = わァ…あ…',
+    '싫어!!! = イヤッ',
+    '싫어~. = ヤダーッ',
+    '루루루루루 = ルルルルル',
+    '후웅? = フゥン',
+    '우라 = ウラ',
+    '야하 = ヤハ',
+    '하아? = ハァ？',
+    '(안주를 나눠 준다) = (つまみを分けてくれる)',
+    '(손으로 O를 그린다) = (手で○を作る)',
+    '하―앗… = ハーッ…',
+    '캬아~ = カーッ…',
+    '(손으로 X를 그린다) = (手で×を作る)',
+    '(커피를 건넨다) = (缶コーヒーをおごる)',
+    '(책을 읽어 준다) = (本を読み聞かせる)',
+    '(후훗 하고 웃는다) = (フフッと笑う)',
+    '(古本 표지판을 세운다) = (「古本」ののぼりを立てる)',
+    '(볼에 빗금을 띄우며 기뻐한다) = (頬を染めて喜ぶ)',
+    '(쿡쿡 웃는다) = (クスクス笑う)',
+    '(물음표를 띄운다) = (？を浮かべる)',
+    '(땀을 뻘뻘 흘린다) = (汗をかく)',
+  ])
 })
 
 test('a sentence with a value in it reads as its language says it', () => {

@@ -6,6 +6,7 @@ import { findFleetRuns, voicedSpecPath } from '../hooks/orca'
 import { cells, fit, planOf, spentBy, ZERO } from '../hooks/view'
 import type { Scene } from '../hooks/view'
 import { firstLine, firstLines, leaderSection, MARKS, memberBlock, memberNamed, namedMember, orcaBlock, pickNote, roleNamed, roleNote, unvoiced } from '../hooks/voice'
+import { asIs } from '../hooks/words'
 import type { Mood, Task } from '../types'
 
 const MOODS: readonly Mood[] = ['calm', 'glad', 'sad', 'shock', 'tired']
@@ -23,8 +24,8 @@ const task = (member: Task['member'], status: Task['status']): Task => ({
   status,
   startedAt: 0,
   toolCount: 0,
-  quote: '',
-  note: '',
+  quote: asIs(''),
+  note: asIs(''),
   mood: 'calm',
 })
 
@@ -347,7 +348,7 @@ test('the plan always has the three the comic is about, a card for each guest at
   expect(planOf({ ...scene([ended]), now: 40_000 }, { columns: 72, rows: 50 })).toMatchObject({ cards: ['hachiware', 'chiikawa', 'usagi'], strip: 4 })
 
   // The rows left over go to the seats of the ones resting first, then to more of the conversation: three cuts at most.
-  const said = (at: number): Scene['feed'][number] => ({ member: 'usagi', quote: '우라', note: '', at, mood: 'calm' })
+  const said = (at: number): Scene['feed'][number] => ({ member: 'usagi', quote: asIs('우라'), note: asIs(''), at, mood: 'calm' })
   const chatty = { ...scene(), feed: [1, 2, 3, 4, 5].map(said) }
 
   expect(planOf(chatty, { columns: 72, rows: 40 })).toMatchObject({ density: 'full', strip: 4, talk: 5 })

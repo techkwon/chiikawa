@@ -3,9 +3,9 @@ import type { Color, Elements, RenderElement } from 'claude-code'
 import type { Aid, Aids, Lang, MemberId, Mood, Roles, Said, Task, Tokens, Usage, WorkRole } from '../types'
 
 import { ART_COLUMNS, ART_ROWS, artRows, ICON_COLUMNS, ICON_ROWS, iconOf } from './art'
-import { CAST, CORE, isActive, isGesture, jobOf, LEAD, MEMBERS, ORDER, PINK, roleOf, say, shortName, shown, toneOf, WORK_ROLES, WORKERS } from './cast'
+import { bare, CAST, CORE, isActive, isGesture, jobOf, LEAD, MEMBERS, ORDER, PINK, roleOf, say, shortName, shown, titleOf, toneOf, WORK_ROLES, WORKERS } from './cast'
 import type { Words } from './words'
-import { WORDS } from './words'
+import { inAll, WORDS } from './words'
 
 /** How the drawings look just now: the tones of the person's theme, and the frame of what moves. */
 export type Look = { isLight: boolean; frame: number }
@@ -399,28 +399,28 @@ const TalkRow = (kit: Kit, lang: Lang, said: Said, width: number, key: string): 
   const { Text } = kit
   const name = CAST[lang].names[said.member]
   const room = width - cells(name) - 3
-  const quote = fit(shown(said.quote), room)
-  const noteRoom = room - cells(quote) - 1
+  const quote = said.quote[lang]
+  const note = said.note[lang]
+  const noteRoom = room - cells(fit(shown(quote), room)) - 1
 
   return (
     <Text key={key} wrap="truncate-end">
       {Badge(kit, said.member, name)}
       <Text> </Text>
-      {Quote(kit, said.member, said.quote, room)}
-      {said.note !== '' && noteRoom >= 6 && <Text dimColor>{` ${fit(said.note, noteRoom)}`}</Text>}
+      {Quote(kit, said.member, quote, room)}
+      {note !== '' && noteRoom >= 6 && <Text dimColor>{` ${fit(note, noteRoom)}`}</Text>}
     </Text>
   )
 }
 
 /** What stands for the conversation before anything was said: 하치와레, waiting for work. */
-const waitingSaid = (scene: Pick<Scene, 'lang'>): Said => ({ member: LEAD, quote: CAST[scene.lang].leader.idle, note: wordsOf(scene).awaiting, at: 0, mood: 'calm' })
+const waitingSaid: Said = { member: LEAD, quote: inAll(lang => CAST[lang].leader.idle), note: inAll(lang => WORDS[lang].awaiting), at: 0, mood: 'calm' }
 
 /** The last lines of the conversation, oldest first, beside the picture of whoever spoke last. */
 const Talk = (kit: Kit, scene: Scene, width: number, lines: number, withPicture: boolean): RenderElement => {
   const { Box } = kit
-  const waiting = waitingSaid(scene)
-  const said = scene.feed.length === 0 ? [waiting] : scene.feed.slice(-Math.max(1, lines))
-  const latest = said[said.length - 1] ?? waiting
+  const said = scene.feed.length === 0 ? [waitingSaid] : scene.feed.slice(-Math.max(1, lines))
+  const latest = said[said.length - 1] ?? waitingSaid
   const room = withPicture ? width - ART_COLUMNS - 1 : width
 
   return (
@@ -453,18 +453,20 @@ const isShout = (quote: string): boolean => /[!！]\s*$/.test(quote)
 const Cut = (kit: Kit, lang: Lang, said: Said, width: number, isTurned: boolean, isWalking: boolean, key: string): RenderElement => {
   const { Box, Text } = kit
   const line = lineOf(kit, said.member)
-  const isCaption = isGesture(said.quote)
-  const words = isCaption ? said.quote.replace(/^\((.*)\)$/, '$1') : said.quote
+  const quote = said.quote[lang]
+  const note = said.note[lang]
+  const isCaption = isGesture(quote)
+  const words = bare(quote)
   const room = width - ART_COLUMNS - 1
   const name = nameIn(lang, said.member, Math.max(2, room - 6))
   const own = Math.max(cells(words), cells(name) + 2) + 4
-  const isBeside = said.note !== '' && room - own - 1 >= Math.min(cells(said.note), 10)
-  const outer = Math.max(cells(name) + 6, Math.min(room, isBeside || said.note === '' ? own : Math.max(own, cells(said.note) + 6)))
+  const isBeside = note !== '' && room - own - 1 >= Math.min(cells(note), 10)
+  const outer = Math.max(cells(name) + 6, Math.min(room, isBeside || note === '' ? own : Math.max(own, cells(note) + 6)))
   const [topLeft, topRight, bottomLeft, bottomRight] = isCaption ? ['┌', '┐', '└', '┘'] : ['╭', '╮', '╰', '╯']
   const text = fit(words, outer - 4)
   const fill = ' '.repeat(Math.max(0, outer - 4 - cells(text)))
-  const beside = isBeside ? fit(said.note, room - outer - 1) : ''
-  const under = isBeside || said.note === '' ? '' : fit(said.note, outer - 6)
+  const beside = isBeside ? fit(note, room - outer - 1) : ''
+  const under = isBeside || note === '' ? '' : fit(note, outer - 6)
   const rim = '─'.repeat(Math.max(0, outer - 5 - cells(name)))
   const foot = '─'.repeat(Math.max(0, under === '' ? outer - 2 : outer - 5 - cells(under)))
   const push = ' '.repeat(Math.max(0, room - outer))
@@ -512,7 +514,7 @@ const shownOf = (scene: Scene, count: number): { from: number; to: number } => {
 /** The last lines of the conversation as cuts down a page, oldest first: the friends on the left, 하치와레 answering from the right. */
 const Page = (kit: Kit, scene: Scene, width: number, count: number): RenderElement => {
   const { from, to } = shownOf(scene, count)
-  const said = scene.feed.length === 0 ? [waitingSaid(scene)] : scene.feed.slice(from, to)
+  const said = scene.feed.length === 0 ? [waitingSaid] : scene.feed.slice(from, to)
 
   return (
     <kit.Box flexDirection="column" width={width}>
@@ -734,8 +736,8 @@ const tally = (scene: Scene): { done: number; failed: number } | undefined => {
 /** A character's tasks, the newest first. */
 const tasksOf = (scene: Scene, id: MemberId): Task[] => scene.tasks.filter(task => task.member === id).sort((a, b) => b.startedAt - a.startedAt)
 
-/** The engine a task runs on: an Orca worker's profile is told as one; a demonstration, which is due at a set time, has only its own word. */
-const engineOf = (task: Task): string => (task.kind === 'orca' && task.due === undefined ? `Orca ${task.engine}` : task.engine)
+/** The engine a task runs on: an Orca worker's profile is told as one; a demonstration, which is due at a set time, has only the language's word for one. */
+const engineOf = (words: Words, task: Task): string => (task.due !== undefined ? words.demo : task.kind === 'orca' ? `Orca ${task.engine}` : task.engine)
 
 const doingOf = (words: Words, task: Task): string => {
   const on = task.detail === undefined || task.detail === '' ? '' : ` ${task.detail}`
@@ -745,7 +747,8 @@ const doingOf = (words: Words, task: Task): string => {
 
 const cardOf = (id: MemberId, scene: Scene): Card => {
   const words = wordsOf(scene)
-  const cast = CAST[scene.lang]
+  const { lang } = scene
+  const cast = CAST[lang]
   const name = cast.names[id]
   const sub = [cast.kinds[id], cast.titles[id], cast.job[roleOf(id, scene.roles)]].filter(part => part !== '').join(' · ')
   const idle = `○ ${words.idle}`
@@ -759,6 +762,7 @@ const cardOf = (id: MemberId, scene: Scene): Card => {
     const own = id === LEAD && busy.length === 0 ? aidOf(scene, LEAD) : undefined
     const hands = CORE.filter(one => one !== LEAD && aidOf(scene, one) !== undefined)
     const isAlone = busy.length === 0 && own === undefined
+    const what = own?.what[lang]
 
     return {
       id,
@@ -769,11 +773,11 @@ const cardOf = (id: MemberId, scene: Scene): Card => {
       isIdle: isAlone,
       isRunning: !isAlone,
       isEnded: false,
-      work: own !== undefined ? own.what : busy.length === 0 ? words.awaiting : words.atWork(busy.map(one => cast.names[one])),
+      work: what ?? (busy.length === 0 ? words.awaiting : words.atWork(busy.map(one => cast.names[one]))),
       // In a cut: how many have the work, or whose hand he has; the sheet has the rest.
-      ...(id !== LEAD ? {} : busy.length > 0 ? { title: words.handed(busy.length) } : own !== undefined ? { title: own.brief ?? own.what.split(' · ')[0] ?? own.what } : {}),
-      quote: said?.quote ?? say(scene.lang, id, 'idle', 0),
-      note: said?.note ?? '',
+      ...(id !== LEAD ? {} : busy.length > 0 ? { title: words.handed(busy.length) } : what !== undefined ? { title: own?.brief?.[lang] ?? what.split(' · ')[0] ?? what } : {}),
+      quote: said?.quote[lang] ?? say(lang, id, 'idle', 0),
+      note: said?.note[lang] ?? '',
       last: id === LEAD && day !== undefined ? words.tally(day.done, day.failed) : '',
     }
   }
@@ -785,15 +789,16 @@ const cardOf = (id: MemberId, scene: Scene): Card => {
   if (aid !== undefined && (task === undefined || !isActive(task))) {
     const said = lastSaid(scene, id)
 
-    return { id, name, sub, status: `${MARK.running} ${words.helping}`, tint: undefined, isIdle: false, isRunning: true, isEnded: false, work: aid.what, quote: said?.quote ?? say(scene.lang, id, 'start', 0), note: said?.note ?? '', last: '' }
+    return { id, name, sub, status: `${MARK.running} ${words.helping}`, tint: undefined, isIdle: false, isRunning: true, isEnded: false, work: aid.what[lang], quote: said?.quote[lang] ?? say(lang, id, 'start', 0), note: said?.note[lang] ?? '', last: '' }
   }
   if (task === undefined) {
-    return { id, name, sub, status: idle, tint: undefined, isIdle: true, isRunning: false, isEnded: false, work: jobOf(scene.lang, id, scene.roles), quote: say(scene.lang, id, 'idle', 0), note: '', last: '' }
+    return { id, name, sub, status: idle, tint: undefined, isIdle: true, isRunning: false, isEnded: false, work: jobOf(lang, id, scene.roles), quote: say(lang, id, 'idle', 0), note: '', last: '' }
   }
 
   const active = own.filter(isActive).length
   const more = active > 1 ? ` ${words.more(active - 1)}` : ''
-  const back = task.report === undefined ? '' : `↳ ${task.report}`
+  const back = task.report === undefined ? '' : `↳ ${task.report[lang]}`
+  const title = `${titleOf(lang, task)}${more}`
 
   return {
     id,
@@ -804,10 +809,10 @@ const cardOf = (id: MemberId, scene: Scene): Card => {
     isIdle: false,
     isRunning: task.status === 'running',
     isEnded: !isActive(task),
-    work: `${task.title}${more} · ${engineOf(task)}`,
-    title: `${task.title}${more}`,
-    quote: task.quote,
-    note: task.note,
+    work: `${title} · ${engineOf(words, task)}`,
+    title,
+    quote: task.quote[lang],
+    note: task.note[lang],
     last: isActive(task) ? doingOf(words, task) : back,
   }
 }
@@ -985,16 +990,17 @@ const LISTED = 3
 const LABEL = 8
 
 /** One task in hand: its name, the engine and how long it has run, the tool in its hand, why it waits, where its result goes. */
-const taskRows = (words: Words, task: Task, now: number, label: string): SheetRow[] => {
+const taskRows = (lang: Lang, task: Task, now: number, label: string): SheetRow[] => {
+  const words = WORDS[lang]
   const tint = TINT[task.status]
   const rows: SheetRow[] = [
-    { label, text: `${MARK[task.status]} ${task.title}`, ...(tint === undefined ? {} : { tint }) },
-    { label: '', text: `  ${engineOf(task)} · ${words.status[task.status]} ${clock(elapsed(task, now))}` },
+    { label, text: `${MARK[task.status]} ${titleOf(lang, task)}`, ...(tint === undefined ? {} : { tint }) },
+    { label: '', text: `  ${engineOf(words, task)} · ${words.status[task.status]} ${clock(elapsed(task, now))}` },
   ]
   const doing = doingOf(words, task)
 
   if (doing !== '') rows.push({ label: '', text: `  ${doing}` })
-  if (task.status === 'waiting' && task.note !== '') rows.push({ label: '', text: `  ${task.note}` })
+  if (task.status === 'waiting' && task.note[lang] !== '') rows.push({ label: '', text: `  ${task.note[lang]}` })
   if (task.out !== undefined) rows.push({ label: words.labels.result, text: task.out, isPath: true })
 
   return rows
@@ -1004,11 +1010,12 @@ const saidRows = (scene: Scene, id: MemberId): SheetRow[] =>
   scene.feed
     .filter(one => one.member === id)
     .slice(-2)
-    .map((one, index) => ({ label: index === 0 ? wordsOf(scene).labels.said : '', text: `${shown(one.quote)}${one.note === '' ? '' : ` ${one.note}`}` }))
+    .map((one, index) => ({ label: index === 0 ? wordsOf(scene).labels.said : '', text: `${shown(one.quote[scene.lang])}${one.note[scene.lang] === '' ? '' : ` ${one.note[scene.lang]}`}` }))
 
 /** The sheet of the character the person asked about; none where they asked about no one. */
 const sheetOf = (scene: Scene): Sheet | undefined => {
   const id = scene.watched
+  const { lang } = scene
 
   if (id === null) return undefined
   const words = wordsOf(scene)
@@ -1021,12 +1028,12 @@ const sheetOf = (scene: Scene): Sheet | undefined => {
     const active = scene.tasks.filter(isActive).sort((a, b) => a.startedAt - b.startedAt)
     const day = tally(scene)
     const own = aidOf(scene, LEAD)
-    const rows: SheetRow[] = [{ label: labels.now, text: active.length > 0 ? words.conducting(active.length) : own === undefined ? words.awaiting : `${MARK.running} ${words.alone} · ${own.what}` }]
+    const rows: SheetRow[] = [{ label: labels.now, text: active.length > 0 ? words.conducting(active.length) : own === undefined ? words.awaiting : `${MARK.running} ${words.alone} · ${own.what[lang]}` }]
 
     for (const task of active.slice(0, LISTED * 2)) {
       const tint = TINT[task.status]
 
-      rows.push({ label: '', text: `${MARK[task.status]} ${nameOf(scene, task.member)}: ${task.title} · ${words.status[task.status]} ${clock(elapsed(task, scene.now))}`, ...(tint === undefined ? {} : { tint }) })
+      rows.push({ label: '', text: `${MARK[task.status]} ${nameOf(scene, task.member)}: ${titleOf(lang, task)} · ${words.status[task.status]} ${clock(elapsed(task, scene.now))}`, ...(tint === undefined ? {} : { tint }) })
     }
     if (active.length > LISTED * 2) rows.push({ label: '', text: words.more(active.length - LISTED * 2) })
     if (day !== undefined) rows.push({ label: labels.today, text: words.today(day.done, day.failed) })
@@ -1038,15 +1045,16 @@ const sheetOf = (scene: Scene): Sheet | undefined => {
   const active = own.filter(isActive)
   const ended = own.find(task => !isActive(task))
   const aid = aidOf(scene, id)
-  const resting: SheetRow = aid === undefined ? { label: labels.now, text: `${words.rest} · ${jobOf(scene.lang, id, scene.roles)}` } : { label: labels.now, text: `${MARK.running} ${words.aidingLead} · ${aid.what}` }
-  const rows: SheetRow[] = active.length === 0 ? [resting] : active.slice(0, LISTED).flatMap((task, index) => taskRows(words, task, scene.now, index === 0 ? labels.now : ''))
+  const resting: SheetRow = aid === undefined ? { label: labels.now, text: `${words.rest} · ${jobOf(lang, id, scene.roles)}` } : { label: labels.now, text: `${MARK.running} ${words.aidingLead} · ${aid.what[lang]}` }
+  const rows: SheetRow[] = active.length === 0 ? [resting] : active.slice(0, LISTED).flatMap((task, index) => taskRows(lang, task, scene.now, index === 0 ? labels.now : ''))
 
   if (active.length > LISTED) rows.push({ label: '', text: words.more(active.length - LISTED) })
   if (ended !== undefined) {
     const tint = TINT[ended.status]
-    const told = ended.summary ?? (ended.report === undefined ? [] : [ended.report])
+    // The report is the first of the lines handed back: it stands as this language has it, over the rest as they were written.
+    const told = ended.report === undefined ? [] : [ended.report[lang], ...(ended.summary ?? []).slice(1)]
 
-    rows.push({ label: labels.ended, text: `${MARK[ended.status]} ${ended.title} · ${words.spoken(elapsed(ended, scene.now))}`, ...(tint === undefined ? {} : { tint }) })
+    rows.push({ label: labels.ended, text: `${MARK[ended.status]} ${titleOf(lang, ended)} · ${words.spoken(elapsed(ended, scene.now))}`, ...(tint === undefined ? {} : { tint }) })
     rows.push(...told.map((line, index) => ({ label: index === 0 ? labels.report : '', text: line })))
   }
 
@@ -1459,7 +1467,7 @@ export const drawPane = (kit: Kit, scene: Scene, isOn: boolean, room: Room, acts
       <Box flexDirection="column" width={width}>
         {title}
         {TalkRule(kit, scene, plan.talk, width, acts)}
-        {isFull ? Page(kit, scene, width, plan.talk) : (scene.feed.length === 0 ? [waitingSaid(scene)] : scene.feed.slice(from, to)).map((one, index) => TalkRow(kit, scene.lang, one, width, `said-${one.at}-${index}`))}
+        {isFull ? Page(kit, scene, width, plan.talk) : (scene.feed.length === 0 ? [waitingSaid] : scene.feed.slice(from, to)).map((one, index) => TalkRow(kit, scene.lang, one, width, `said-${one.at}-${index}`))}
       </Box>
     )
   }
@@ -1508,7 +1516,7 @@ export const rosterLines = (scene: Scene): string[] =>
 
 /** The conversation as plain lines, oldest first. */
 export const talkLines = (scene: Scene, lines: number): string[] =>
-  scene.feed.slice(-lines).map(said => `${nameOf(scene, said.member)}: ${shown(said.quote)}${said.note === '' ? '' : ` (${said.note})`}`)
+  scene.feed.slice(-lines).map(said => `${nameOf(scene, said.member)}: ${shown(said.quote[scene.lang])}${said.note[scene.lang] === '' ? '' : ` (${said.note[scene.lang]})`}`)
 
 /** The usage as plain lines: what `/chiikawa usage` prints. */
 export const usageLines = (scene: Scene): string[] => {

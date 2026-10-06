@@ -1,7 +1,13 @@
-import type { Lang, LangKept, TaskStatus } from '../types'
+import type { Lang, LangKept, Phrase, TaskStatus } from '../types'
 
 /** The languages, the one the mode falls back on first. */
 export const LANGS: readonly Lang[] = ['en', 'ko', 'ja']
+
+/** Words made in every language at once, each as that language makes them. */
+export const inAll = (make: (lang: Lang) => string): Phrase => ({ en: make('en'), ko: make('ko'), ja: make('ja') })
+
+/** Words that are someone else's, as they were written: the same in every language. */
+export const asIs = (text: string): Phrase => inAll(() => text)
 
 /** What each language calls itself. */
 export const LANG_NAMES: Record<Lang, string> = { en: 'English', ko: '한국어', ja: '日本語' }
@@ -262,7 +268,7 @@ const koSpecialtyFirst = (specialties: string): string =>
 
 const KO: Words = {
   brand: '먼작귀',
-  on: 'ちいかわ',
+  on: '켜짐',
   off: '꺼짐',
 
   spoken: ms => {
@@ -824,5 +830,5 @@ const JA: Words = {
 
 export const WORDS: Record<Lang, Words> = { en: EN, ko: KO, ja: JA }
 
-/** Whether a text is the same words in any of the languages: a line said before the language changed is still known. */
-export const isSaid = (pick: (words: Words) => string, text: string): boolean => LANGS.some(lang => pick(WORDS[lang]) === text)
+/** Whether words kept in each language are these words of the screen's own: one language that has them tells. */
+export const isSaid = (pick: (words: Words) => string, said: Phrase): boolean => LANGS.some(lang => pick(WORDS[lang]) === said[lang])

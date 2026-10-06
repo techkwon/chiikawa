@@ -1,10 +1,11 @@
 import type { Color } from 'claude-code'
 
-import type { Lang, MemberId, Mood, Role, Roles, Task, WorkRole } from '../types'
+import type { Lang, MemberId, Mood, Phrase, Role, Roles, Task, WorkRole } from '../types'
 
 import { EN } from './cast.en'
 import { JA } from './cast.ja'
 import { KO } from './cast.ko'
+import { asIs, inAll, LANGS } from './words'
 
 /** What a character is whatever the language: its mark, its own role, whether it talks, its colors. */
 export type Member = {
@@ -150,6 +151,8 @@ export type Situation = 'idle' | 'start' | 'done' | 'fail' | 'slow' | 'denied'
 
 export const MOODS: Record<Situation, Mood> = { idle: 'calm', start: 'calm', done: 'glad', fail: 'sad', slow: 'tired', denied: 'shock' }
 
+const SITUATIONS: readonly Situation[] = ['idle', 'start', 'done', 'fail', 'slow', 'denied']
+
 /** 하치와레's own lines for what he does as the conductor. */
 export type Leader = Record<'idle' | 'allDone' | 'sweep' | 'trouble' | 'cry' | 'cheer' | 'sure' | 'found', string>
 
@@ -217,6 +220,55 @@ export const isGesture = (quote: string): boolean => quote.startsWith('(')
 
 export const shown = (quote: string): string => (isGesture(quote) ? quote : `“${quote}”`)
 
+/** A gesture as what was done, without the parentheses that mark it; a line as it is. */
+export const bare = (quote: string): string => quote.replace(/^\((.*)\)$/, '$1')
+
+/**
+ * The places where the Korean cast has the very sound or gesture the Japanese
+ * one has, for the friends who cannot talk: each checked by hand, a sound
+ * against the original the Korean cast's own list names beside it, a gesture
+ * against what it tells. Two lines that only share a place are not here, as
+ * 나도! and ヤーッ!!, nor two that are one sound at different places, as 푸랴!
+ * and プルャ: nothing is made of those. The English cast is the Japanese one
+ * put into English place for place, so every place of those two is one line.
+ */
+const ALIKE: Readonly<Partial<Record<MemberId, Partial<Record<Situation, readonly number[]>>>>> = {
+  chiikawa: { start: [0], fail: [0], denied: [0, 1] },
+  usagi: { idle: [0, 1], start: [0, 1], fail: [0], slow: [0] },
+  kurimanju: { idle: [0], start: [0], done: [0, 1, 2], fail: [0], slow: [0], denied: [0] },
+  kani: { idle: [0, 1], start: [0], done: [0, 1], fail: [0], slow: [0], denied: [0] },
+}
+
+/** Each sound and gesture of a character as the languages have it, a place at a time: the Korean one only where it is that very line. */
+const voicesOf = (member: MemberId): Partial<Phrase>[] =>
+  SITUATIONS.flatMap(situation =>
+    CAST.ja.quotes[member][situation].map((ja, at) => ({
+      ja,
+      en: CAST.en.quotes[member][situation][at],
+      ko: ALIKE[member]?.[situation]?.includes(at) === true ? CAST.ko.quotes[member][situation][at] : undefined,
+    })),
+  )
+
+/**
+ * The first line of a report as each language shows it. It is the worker's
+ * own writing and stays as written, but for one case: a character that
+ * cannot talk wrote one of its own sounds or gestures, letter for letter, and
+ * another language has that very line and no other for it. A gesture written
+ * without its parentheses is known by what it tells, and is shown without
+ * them. No line is made up: a language with no such line shows the one written.
+ */
+export const reported = (member: MemberId, line: string): Phrase => {
+  if (MEMBERS[member].speaks) return asIs(line)
+  const told = (voice: string): string => (isGesture(line) ? voice : bare(voice))
+  const known = voicesOf(member).filter(voice => LANGS.some(lang => voice[lang] !== undefined && told(voice[lang]) === line))
+
+  return inAll(lang => {
+    const [only, ...others] = new Set(known.flatMap(voice => voice[lang] ?? []))
+
+    return only === undefined || others.length > 0 ? line : told(only)
+  })
+}
+
 /** How 하치와레 reads what a friend who cannot talk just did. */
 export const readingOf = (lang: Lang, member: MemberId, situation: 'start' | 'done' | 'fail', role: Role): string | undefined => {
   const { leader, means, read } = CAST[lang]
@@ -231,6 +283,9 @@ export const readingOf = (lang: Lang, member: MemberId, situation: 'start' | 'do
 }
 
 export const isActive = (task: Task): boolean => task.status === 'running' || task.status === 'waiting'
+
+/** What a task is called on a screen in that language: as it was handed over, but for one the mode named itself. */
+export const titleOf = (lang: Lang, task: Pick<Task, 'title' | 'titles'>): string => task.titles?.[lang] ?? task.title
 
 const PREFERENCE: Record<WorkRole, readonly MemberId[]> = {
   구현: ['shisa', 'rakko', 'pochette', 'chiikawa'],

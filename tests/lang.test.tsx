@@ -36,7 +36,7 @@ const AUTO = { options: { language: 'auto' } } as const
  * What a session rests on, each part the test's to change: what the store
  * keeps and whether it can be reached, written to, or is slow to answer for
  * one key, the environment, and the language Claude Code itself is set to.
- * Answers those, with what the mode did: the keys it read from the store,
+ * Answers those and the clock, with what the mode did: the keys it read from the store,
  * the command as it was registered each time, what went beside each prompt,
  * what it asked to be drawn again, and the toasts it raised.
  */
@@ -46,6 +46,7 @@ const world = (
   kept: Map<string, unknown>
   env: Record<string, string>
   set: { language?: string; isStoreBroken: boolean; isStoreClosed: boolean; slow?: { key: string; held: Promise<void> } }
+  clock: ReturnType<typeof mock.clock>
   reads: string[]
   registered: { description: string; argumentHint?: string }[]
   told: (readonly string[] | undefined)[]
@@ -61,7 +62,8 @@ const world = (
   const invalidated: string[] = []
   const toasts: string[] = []
 
-  mock.clock(on, { now: 1000 })
+  const clock = mock.clock(on, { now: 1000 })
+
   on('store.get', async ($, e) => {
     if (set.isStoreBroken) throw new Error('EACCES')
     // What is kept is answered as it was when it was asked for, however long the answer takes.
@@ -106,7 +108,7 @@ const world = (
     return { text: e.text }
   })
 
-  return { kept, env, set, reads, registered, told, invalidated, toasts }
+  return { kept, env, set, clock, reads, registered, told, invalidated, toasts }
 }
 
 const run = async ($: Engine, args: string): Promise<string> => (await $.command.run({ command: 'chiikawa', args, ...RUN })).text ?? ''
@@ -438,7 +440,7 @@ test('after the language changes, the main loop is told once more beside the nex
   await run($, 'clear all')
 })
 
-test('what is said from then on is in the new language, and what was said before stays as it was said', AUTO, async ($, on) => {
+test('what is said from then on is in the new language, and what was said before is shown in it too, but for what someone else wrote', AUTO, async ($, on) => {
   const { kept } = world(on)
   const seen: AgentSpawnInput[] = []
 
@@ -455,11 +457,11 @@ test('what is said from then on is in the new language, and what was said before
   expect(seen[0]?.prompt).toContain(MARKS.ko)
 
   expect(await run($, 'lang en')).toContain('The language is now English.')
-  // The conversation keeps a line as it was said: the start in Korean, under the English name.
+  // The conversation shows a line in the language of the screen: the start said in Korean reads in English, and the task's title, which the mode did not write, stays as written.
   const first = await run($, '')
 
   expect(first).toContain('🦦 Rakko (Build) ● working')
-  expect(first).toMatch(/Rakko: “[^”]*[가-힣][^”]*” \(토벌 시작 · 로그인 버그 토벌\)/)
+  expect(first).toContain('Rakko: “The usual.” (Hunt begins · 로그인 버그 토벌)')
   // The task taken in Korean ends in English, and a new one is taken in English.
   await $.turn.complete({ ...DONE, answer: '🦦 랏코: 온다!\n고쳤다.', agentId: 'agent_1', reason: 'answer' })
   await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2', description: 'Kurimanju: look over the change' })
@@ -481,6 +483,207 @@ test('what is said from then on is in the new language, and what was said before
   expect(seen[2]?.prompt).toContain('you are Shisa')
   expect(seen[2]?.prompt).not.toContain('랏코')
 
+  await run($, 'lang auto')
+  await run($, 'clear all')
+})
+
+/**
+ * Everything the mode shows of what was said and done, as it is written: the
+ * command's answer, the page of cuts, the sheet of the friend asked about
+ * and the conductor's, the conversation alone as cuts and as lines, the list
+ * a short pane has, and the band with the last line as a cut and as a line.
+ */
+const pages = async ($: Engine, friend = 'kani'): Promise<string[]> => {
+  const all = [await run($, '')]
+  const pane = async (columns: number, rows: number, ...keys: string[]): Promise<void> => {
+    const mounted = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: { ...PANE, bodyColumns: columns, scroll: { offset: 0, bodyRows: rows } } })
+
+    for (const key of keys) await mounted.press({ key })
+    all.push(...written((await mounted.drawn()) as Drawn))
+    await mounted.unmount()
+  }
+
+  await pane(84, 70)
+  await pane(84, 70, `watch-${friend}`)
+  await pane(84, 70, 'watch-hachiware')
+  await pane(84, 70, 'watch-close', 'talk-only')
+  await pane(44, 30)
+  await pane(44, 12, 'talk-only')
+  // The band has the conversation only while the pane is not up to show it: a session that starts again finds none up.
+  await $.session.start(START)
+  for (const [columns, maxRows] of [[150, 4], [60, 2]] as const) {
+    const band = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: columns, maxRows } })
+
+    all.push(...written((await band.drawn()) as Drawn))
+    await band.unmount()
+  }
+
+  return all
+}
+
+/** What a friend's work comes to in each language: the lines the mode says of it, a few of the many. */
+const SAID = {
+  en: ['Ura!', 'looking · working.png', 'So that means "I\'ll look for it"?!', 'reading Usagi', 'Forage begins · sort the notes', 'blushes happily', 'Forage done · 2s', 'So that means "found it"?!', 'reading Furuhonya', 'Easy!! Easy!!!', '2 tasks done', 'with Usagi'],
+  ko: ['우라', '찾는 중 · working.png', '그 말은 "찾아볼게"라는 거?', '우사기의 말 풀이', '채집 시작 · sort the notes', '볼에 빗금을 띄우며 기뻐한다', '채집 끝 · 2초', '그 말은 "찾았어"라는 거?', '카니의 말 풀이', '간단!! 간단!!!', '2개 작업 끝', '우사기와 함께'],
+  ja: ['ウラ', 'さがし中 · working.png', 'それって "さがしてみる" ってコト!?', 'うさぎの言葉の読みとき', '採取開始 · sort the notes', '頬を染めて喜ぶ', '採取完了 · 2秒', 'それって "見つけた" ってコト!?', '古本屋の言葉の読みとき', '簡単ッ簡単ッ', '2件の作業が完了', 'うさぎといっしょ'],
+} as const
+
+// Nothing moves on the screen, so that one drawing can be held against another made at a later moment.
+test('lines said in one language are shown in whichever language the screen turns to, as if they had been said in it: only what someone else wrote stays', { options: { language: 'auto', animate: false } }, async ($, on) => {
+  const { kept, clock } = world(on)
+  const box = { spawned: 0 }
+
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `agent_${(box.spawned += 1)}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  kept.set('lang', {})
+  await $.session.start(START)
+
+  // The three at a file, then two friends who cannot talk take a task each and end it: one with a gesture alone, one with a gesture and a report under it.
+  const play = async (): Promise<void> => {
+    const from = box.spawned
+
+    await $.tool.call({ tool: 'Read', file_path: '/w/art/working.png' })
+    await $.agent.spawn({ ...SPAWN, tool_use_id: `toolu_${from + 1}`, description: 'Furuhonya: sort the notes' })
+    await $.agent.spawn({ ...SPAWN, tool_use_id: `toolu_${from + 2}`, description: 'Kurimanju: look over the change' })
+    await clock.advance(2000)
+    await $.turn.complete({ ...DONE, turnId: `turn_${from + 1}`, answer: '🦀 Furuhonya: (blushes happily)', agentId: `agent_${from + 1}`, reason: 'answer' })
+    await $.turn.complete({ ...DONE, turnId: `turn_${from + 2}`, answer: '🌰 Kurimanju: (makes an O with both hands)\nThe change holds up.', agentId: `agent_${from + 2}`, reason: 'answer' })
+  }
+  const has = (drawn: readonly string[], piece: string): string => `${piece} ${String(drawn.some(text => text.includes(piece)))}`
+  // What the screen shows of it where it was said in the screen's own language from the first.
+  const straight: Partial<Record<(typeof LANGS)[number], string[]>> = {}
+
+  for (const lang of LANGS) {
+    await run($, `lang ${lang}`)
+    await play()
+    straight[lang] = await pages($)
+    for (const piece of SAID[lang]) expect(has(straight[lang] ?? [], piece)).toBe(`${piece} true`)
+    await run($, 'clear all')
+  }
+  expect(straight.ko).not.toEqual(straight.en)
+
+  // Said in English, and the screen turned to Korean by the letters of a prompt, then to Japanese and back by the command.
+  await run($, 'lang auto')
+  await play()
+  expect(await pages($)).toEqual(straight.en)
+  await enter($, '이제 한국어로 할게')
+  const turned = await pages($)
+
+  expect(turned).toEqual(straight.ko)
+  for (const piece of SAID.en) expect(has(turned, piece)).toBe(`${piece} false`)
+  // A gesture a friend who cannot talk wrote as its whole report is one of its own: it is shown as Korean has it, on its cut and on its sheet.
+  expect(has(turned, '↳ (볼에 빗금을')).toContain('true')
+  expect(turned.filter(text => /^보고 +\(볼에 빗금을 띄우며 기뻐한다\)$/.test(text))).toHaveLength(1)
+  // What someone else wrote stays as written: a task's title, what a tool was on, a line of a report.
+  for (const piece of ['sort the notes', 'look over the change', 'working.png', 'The change holds up.']) expect(has(turned, piece)).toBe(`${piece} true`)
+  await run($, 'lang ja')
+  expect(await pages($)).toEqual(straight.ja)
+  await run($, 'lang en')
+  expect(await pages($)).toEqual(straight.en)
+  await run($, 'lang auto')
+  await run($, 'clear all')
+})
+
+test("a demonstration's tasks are named, told of and reported in the language the screen turns to", AUTO, async ($, on) => {
+  const { kept, clock } = world(on)
+
+  kept.set('lang', {})
+  await $.session.start(START)
+  await run($, 'demo')
+  await clock.advance(6000)
+  const has = (drawn: readonly string[], piece: string): string => `${piece} ${String(drawn.some(text => text.includes(piece)))}`
+  // One has ended and three are at work: the names of the tasks, the word for what runs them and what was handed back.
+  const shown = {
+    en: ['Demo: find the config file', 'Demo: hunt the login bug', '· demo', 'Scout begins · Demo: find the config file', 'Scout done · 4s · demo', 'This was a demo, so nothing was really done (find the config file)'],
+    ko: ['시연: 설정 파일 위치 찾기', '시연: 로그인 버그 토벌', '· 시연', '탐색 시작 · 시연: 설정 파일 위치 찾기', '탐색 끝 · 4초 · 시연', '시연이라 실제로 한 일은 없어요 (설정 파일 위치 찾기)'],
+    ja: ['デモ: 設定ファイルの場所をさがす', 'デモ: ログインバグの討伐', '· デモ', '探索開始 · デモ: 設定ファイルの場所をさがす', '探索完了 · 4秒 · デモ', 'デモなので、実際には何もしていません (設定ファイルの場所をさがす)'],
+  } as const
+
+  for (const lang of ['en', 'ko', 'ja', 'en'] as const) {
+    await run($, `lang ${lang}`)
+    const drawn = await pages($, 'usagi')
+
+    for (const piece of shown[lang]) expect(has(drawn, piece)).toBe(`${piece} true`)
+    for (const other of LANGS.filter(one => one !== lang)) for (const piece of shown[other]) expect(has(drawn, piece)).toBe(`${piece} false`)
+  }
+  // Its end, which comes while the screen is in another language than it began in, is told in every one too.
+  await run($, 'lang ko')
+  await clock.advance(12_000)
+  const ended = await pages($, 'kurimanju')
+
+  for (const piece of ['4개 가운데 1개 실패', '몇 번이라도 계속 응원할 테니까!!', '검정 끝 · 14초 · 시연']) expect(has(ended, piece)).toBe(`${piece} true`)
+  expect(ended.filter(text => /demo/i.test(text))).toEqual([])
+  await run($, 'lang auto')
+  await run($, 'clear all')
+})
+
+test('what a session under way still holds as one text each, from before words were kept in every language, is drawn as that text whatever the language, and a task held so ends', { options: { language: 'auto', animate: false } }, async ($, on) => {
+  const { kept, clock } = world(on)
+  const box = { isOld: true }
+  // What stood in the session then: a line's words, a task's and a hand's, each as the one text it was said in.
+  const one = (held: unknown): unknown => (typeof held === 'object' && held !== null && 'en' in held ? held.en : held)
+  const old = (held: unknown, keys: readonly string[]): unknown => (typeof held === 'object' && held !== null ? Object.fromEntries(Object.entries(held).map(([key, value]) => [key, keys.includes(key) ? one(value) : value])) : held)
+  /** A list or a table the session holds, each thing in it with those of its words as one text, while the session is taken to be an old one. */
+  const aged = <T,>(held: T, ...keys: string[]): T => {
+    if (!box.isOld || typeof held !== 'object' || held === null) return held
+
+    return (Array.isArray(held) ? held.map(item => old(item, keys)) : Object.fromEntries(Object.entries(held).map(([id, item]) => [id, old(item, keys)]))) as T
+  }
+
+  on('state.get', { plugin: 'chiikawa', key: 'feed' }, async ($, e, next) => {
+    const held = await next(e)
+
+    return held.value === undefined ? held : { value: { ...held.value, value: aged(held.value.value, 'quote', 'note') } }
+  })
+  on('state.get', { plugin: 'chiikawa', key: 'tasks' }, async ($, e, next) => {
+    const held = await next(e)
+
+    return held.value === undefined ? held : { value: { ...held.value, value: aged(held.value.value, 'quote', 'note', 'report') } }
+  })
+  on('state.get', { plugin: 'chiikawa', key: 'aids' }, async ($, e, next) => {
+    const held = await next(e)
+
+    return held.value === undefined ? held : { value: { ...held.value, value: aged(held.value.value, 'what', 'brief') } }
+  })
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  kept.set('lang', {})
+  await $.session.start(START)
+  const has = (drawn: readonly string[], piece: string): string => `${piece} ${String(drawn.some(text => text.includes(piece)))}`
+  const english = ['Ura!', 'looking · working.png', 'Forage begins · sort the notes', 'reading Furuhonya']
+
+  // A hand lent, held so, is told as it was on a Korean screen.
+  await $.tool.call({ tool: 'Read', file_path: '/w/art/working.png' })
+  await run($, 'lang ko')
+  const lent = await pages($)
+
+  for (const piece of ['with Usagi', 'looking with Usagi · working.png']) expect(has(lent, piece)).toBe(`${piece} true`)
+  await $.agent.spawn({ ...SPAWN, description: 'Furuhonya: sort the notes' })
+  await clock.advance(2000)
+
+  // Every drawing is made, on a Korean screen and a Japanese one, and the words held as one text are that text on both.
+  for (const [lang, frame] of [['ko', '먼작귀'], ['ja', 'ちいかわ']] as const) {
+    await run($, `lang ${lang}`)
+    const drawn = await pages($)
+
+    expect(has(drawn, ` ${frame} `)).toContain('true')
+    for (const piece of english) expect(has(drawn, piece)).toBe(`${piece} true`)
+  }
+
+  // The task held so ends as any other: its end is said in every language, under the lines that stay as they were.
+  await run($, 'lang ko')
+  await $.turn.complete({ ...DONE, answer: '🦀 Furuhonya: (blushes happily)', agentId: 'agent_1', reason: 'answer' })
+  box.isOld = false
+  const ended = await pages($)
+
+  for (const piece of ['🦀 카니 (조사) ✓ 끝', '채집 끝 · 2초', '그 말은 "찾았어"라는 거?', 'Forage begins · sort the notes', 'reading Furuhonya']) expect(has(ended, piece)).toBe(`${piece} true`)
+  expect(ended.filter(text => /^보고 +\(볼에 빗금을 띄우며 기뻐한다\)$/.test(text))).toHaveLength(1)
+  // What it handed back, held as one text, is that text.
+  box.isOld = true
+  expect((await pages($)).filter(text => /^보고 +\(blushes happily\)$/.test(text))).toHaveLength(1)
+  box.isOld = false
   await run($, 'lang auto')
   await run($, 'clear all')
 })
@@ -682,6 +885,43 @@ test('in English no pane and no band draws wider than its columns or taller than
 
 test('in Korean too, with as many at work at once and the longest names on their sheets, nothing draws past its room', { options: { language: 'ko' }, timeoutMs: 60_000 }, async ($, on) => {
   expect(await overflows($, on, { long: '포쉐트 갑옷 씨', lead: '하치와레' })).toEqual([])
+  // The words on the screen are Korean ones, the mode's being on among them.
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE })
+
+  expect(await pane.find({ type: 'Text', text: /^ 먼작귀 $/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^켜짐$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /쉬는 친구들/ })).toBeDefined()
+  expect(await pane.find({ key: 'talk-only' })).toMatchObject({ props: { label: '이야기만' } })
+  await pane.unmount()
+
+  // None is a Japanese one, with the mode on or off and with lines said, but for what the Korean cast keeps as the comic writes it:
+  // the 古本 of the bookseller's banner, and 시사's thanks in the Miyako language.
+  await run($, 'demo')
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_kani', description: '카니: 메모 정리' })
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_shisa', description: '시사: 폼 고치기' })
+  const drawn: string[] = []
+  const kept = ['古本', 'たんでぃがーたんでぃ']
+
+  const band = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, bodyColumns: 150 } })
+
+  drawn.push(...written((await band.drawn()) as Drawn))
+  await band.unmount()
+  for (const state of ['on', 'off'] as const) {
+    await run($, state)
+    // A page of cuts, the list a narrow pane has, and the command's own answer.
+    for (const columns of [100, 44]) {
+      const busy = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: { ...PANE, bodyColumns: columns } })
+
+      drawn.push(...written((await busy.drawn()) as Drawn))
+      await busy.unmount()
+    }
+    drawn.push(await run($, ''))
+  }
+  for (const word of kept) expect(`${word} ${String(drawn.some(line => line.includes(word)))}`).toBe(`${word} true`)
+  expect(drawn.filter(line => /[\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Han}]/u.test(kept.reduce((text, word) => text.replaceAll(word, ''), line)))).toEqual([])
+  expect(drawn.filter(line => line === '꺼짐')).not.toEqual([])
+  await run($, 'on')
+  await run($, 'clear all')
 })
 
 test('in Japanese no pane and no band draws wider than its columns or taller than its rows, whatever is on it', { options: { language: 'ja' }, timeoutMs: 60_000 }, async ($, on) => {
