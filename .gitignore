@@ -1,0 +1,7 @@
+# Laid by Claude Code once it has loaded the mod; never committed.
+.claude-plugin/types/
+.DS_Store
+node_modules/
+.omx/
+# Left beside Orca specs while the mod is tried out.
+*.chiikawa-*.md

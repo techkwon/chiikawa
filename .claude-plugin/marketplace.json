@@ -1,0 +1,6 @@
+{
+  "name": "chiikawa",
+  "description": "Chiikawa fan mod for Claude Code: Hachiware conducts, and the friends take on tasks and talk them over (unofficial; English, Korean and Japanese)",
+  "owner": { "name": "techkwon" },
+  "plugins": [{ "name": "chiikawa", "source": "./" }]
+}

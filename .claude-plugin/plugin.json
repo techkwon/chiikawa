@@ -1,0 +1,73 @@
+{
+  "name": "chiikawa",
+  "version": "0.2.0",
+  "description": "Chiikawa mode: Hachiware conducts, and the friends from Chiikawa appear as text drawings to take on tasks and talk them over (Claude subagents + Orca workers). In English, Korean and Japanese.",
+  "author": { "name": "techkwon" },
+  "license": "MIT",
+  "homepage": "https://github.com/techkwon/chiikawa",
+  "repository": "https://github.com/techkwon/chiikawa",
+  "keywords": ["mod", "subagents", "orchestration", "usage", "fan-made", "korean", "japanese"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "One of auto, en, ko, ja. auto (the default) follows, in this order: the language chosen with /chiikawa lang, the letters of the prompts you type (Hangul for Korean, kana for Japanese), Claude Code's own language setting, the LC_ALL / LC_MESSAGES / LANG environment variables, and English. Anything else is read as auto",
+      "default": "auto"
+    },
+    "leaderVoice": {
+      "type": "boolean",
+      "title": "Hachiware's voice",
+      "description": "The main session talks in the voice of Hachiware, the conductor",
+      "default": true
+    },
+    "politeLeader": {
+      "type": "boolean",
+      "title": "Polite Hachiware",
+      "description": "Hachiware speaks politely instead of in the casual speech of the comic",
+      "default": false
+    },
+    "memberVoice": {
+      "type": "boolean",
+      "title": "The friends' voices",
+      "description": "A subagent reports in the voice of the character cast for it (a friend who cannot talk reports with a sound)",
+      "default": true
+    },
+    "orcaVoice": {
+      "type": "boolean",
+      "title": "Orca workers' voices",
+      "description": "A fleet-run launch is handed a copy of its spec, made beside it, with the character's voice added at the end",
+      "default": true
+    },
+    "band": {
+      "type": "boolean",
+      "title": "Band of friends above the prompt",
+      "description": "Shows one row above the prompt with the friends' names (press one to see what that friend is doing), who takes the next prompt (auto by default) and the usage; while the pane is closed, the last line said is drawn under it as one cut",
+      "default": true
+    },
+    "trio": {
+      "type": "boolean",
+      "title": "The three together",
+      "description": "Shows light work the main session does itself as Hachiware, Chiikawa and Usagi at it together (Usagi for tools that search, Chiikawa for tools that edit)",
+      "default": true
+    },
+    "animate": {
+      "type": "boolean",
+      "title": "Movement while working",
+      "description": "The picture and the icon of a character at work move every half second (turned off, only that movement stops: the screen is still redrawn when a task or a tool call changes it, when you press something, and by the check that runs every 2 seconds)",
+      "default": true
+    },
+    "theme": {
+      "type": "string",
+      "title": "Color theme",
+      "description": "One of auto, dark, light. auto (the default) follows the Claude Code theme (a theme with light in its name is a light one). Set light if the colors look faint on a light terminal",
+      "default": "auto"
+    },
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open the pane by itself",
+      "description": "The status pane opens by itself when a friend is handed work (once closed by hand, it is not opened again until /chiikawa)",
+      "default": true
+    }
+  }
+}
