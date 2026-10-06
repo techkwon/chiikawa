@@ -523,9 +523,9 @@ const pages = async ($: Engine, friend = 'kani'): Promise<string[]> => {
 
 /** What a friend's work comes to in each language: the lines the mode says of it, a few of the many. */
 const SAID = {
-  en: ['Ura!', 'looking · working.png', 'So that means "I\'ll look for it"?!', 'reading Usagi', 'Forage begins · sort the notes', 'blushes happily', 'Forage done · 2s', 'So that means "found it"?!', 'reading Furuhonya', 'Easy!! Easy!!!', '2 tasks done', 'with Usagi'],
-  ko: ['우라', '찾는 중 · working.png', '그 말은 "찾아볼게"라는 거?', '우사기의 말 풀이', '채집 시작 · sort the notes', '볼에 빗금을 띄우며 기뻐한다', '채집 끝 · 2초', '그 말은 "찾았어"라는 거?', '카니의 말 풀이', '간단!! 간단!!!', '2개 작업 끝', '우사기와 함께'],
-  ja: ['ウラ', 'さがし中 · working.png', 'それって "さがしてみる" ってコト!?', 'うさぎの言葉の読みとき', '採取開始 · sort the notes', '頬を染めて喜ぶ', '採取完了 · 2秒', 'それって "見つけた" ってコト!?', '古本屋の言葉の読みとき', '簡単ッ簡単ッ', '2件の作業が完了', 'うさぎといっしょ'],
+  en: ['Ura!', 'looking · working.md', 'So that means "I\'ll look for it"?!', 'reading Usagi', 'Forage begins · sort the notes', 'blushes happily', 'Forage done · 2s', 'So that means "found it"?!', 'reading Furuhonya', 'Easy!! Easy!!!', '2 tasks done', 'with Usagi'],
+  ko: ['우라', '찾는 중 · working.md', '그 말은 "찾아볼게"라는 거?', '우사기의 말 풀이', '채집 시작 · sort the notes', '볼에 빗금을 띄우며 기뻐한다', '채집 끝 · 2초', '그 말은 "찾았어"라는 거?', '카니의 말 풀이', '간단!! 간단!!!', '2개 작업 끝', '우사기와 함께'],
+  ja: ['ウラ', 'さがし中 · working.md', 'それって "さがしてみる" ってコト!?', 'うさぎの言葉の読みとき', '採取開始 · sort the notes', '頬を染めて喜ぶ', '採取完了 · 2秒', 'それって "見つけた" ってコト!?', '古本屋の言葉の読みとき', '簡単ッ簡単ッ', '2件の作業が完了', 'うさぎといっしょ'],
 } as const
 
 // Nothing moves on the screen, so that one drawing can be held against another made at a later moment.
@@ -543,7 +543,7 @@ test('lines said in one language are shown in whichever language the screen turn
   const play = async (): Promise<void> => {
     const from = box.spawned
 
-    await $.tool.call({ tool: 'Read', file_path: '/w/art/working.png' })
+    await $.tool.call({ tool: 'Read', file_path: '/w/notes/working.md' })
     await $.agent.spawn({ ...SPAWN, tool_use_id: `toolu_${from + 1}`, description: 'Furuhonya: sort the notes' })
     await $.agent.spawn({ ...SPAWN, tool_use_id: `toolu_${from + 2}`, description: 'Kurimanju: look over the change' })
     await clock.advance(2000)
@@ -576,7 +576,7 @@ test('lines said in one language are shown in whichever language the screen turn
   expect(has(turned, '↳ (볼에 빗금을')).toContain('true')
   expect(turned.filter(text => /^보고 +\(볼에 빗금을 띄우며 기뻐한다\)$/.test(text))).toHaveLength(1)
   // What someone else wrote stays as written: a task's title, what a tool was on, a line of a report.
-  for (const piece of ['sort the notes', 'look over the change', 'working.png', 'The change holds up.']) expect(has(turned, piece)).toBe(`${piece} true`)
+  for (const piece of ['sort the notes', 'look over the change', 'working.md', 'The change holds up.']) expect(has(turned, piece)).toBe(`${piece} true`)
   await run($, 'lang ja')
   expect(await pages($)).toEqual(straight.ja)
   await run($, 'lang en')
@@ -652,14 +652,14 @@ test('what a session under way still holds as one text each, from before words w
   kept.set('lang', {})
   await $.session.start(START)
   const has = (drawn: readonly string[], piece: string): string => `${piece} ${String(drawn.some(text => text.includes(piece)))}`
-  const english = ['Ura!', 'looking · working.png', 'Forage begins · sort the notes', 'reading Furuhonya']
+  const english = ['Ura!', 'looking · working.md', 'Forage begins · sort the notes', 'reading Furuhonya']
 
   // A hand lent, held so, is told as it was on a Korean screen.
-  await $.tool.call({ tool: 'Read', file_path: '/w/art/working.png' })
+  await $.tool.call({ tool: 'Read', file_path: '/w/notes/working.md' })
   await run($, 'lang ko')
   const lent = await pages($)
 
-  for (const piece of ['with Usagi', 'looking with Usagi · working.png']) expect(has(lent, piece)).toBe(`${piece} true`)
+  for (const piece of ['with Usagi', 'looking with Usagi · working.md']) expect(has(lent, piece)).toBe(`${piece} true`)
   await $.agent.spawn({ ...SPAWN, description: 'Furuhonya: sort the notes' })
   await clock.advance(2000)
 

@@ -402,9 +402,9 @@ const lend = ($: Engine, tool: string, detail: string): Promise<void> =>
     const now = await $.clock.now()
     const wanted: MemberId | undefined = SEEK.has(tool) ? 'usagi' : MEND.has(tool) ? 'chiikawa' : undefined
     const helper = wanted !== undefined && !(await read($, tasks)).some(task => task.member === wanted && isActive(task)) ? wanted : undefined
-    const on = detail === '' ? '' : ` · ${detail}`
+    const target = detail === '' ? '' : ` · ${detail}`
     const verb = (lang: Lang): string => (helper === 'usagi' ? WORDS[lang].seeking : WORDS[lang].mending)
-    const doing = inAll(lang => `${verb(lang)}${on}`)
+    const doing = inAll(lang => `${verb(lang)}${target}`)
     const box = { isDue: false }
 
     await update($, aids, was => {
@@ -412,8 +412,8 @@ const lend = ($: Engine, tool: string, detail: string): Promise<void> =>
         ...was,
         [LEAD]:
           helper === undefined
-            ? { what: asIs(`${tool}${on}`), at: now, saidAt: now }
-            : { what: inAll(lang => `${WORDS[lang].lending(CAST[lang].names[helper], verb(lang))}${on}`), brief: inAll(lang => WORDS[lang].withFriend(CAST[lang].names[helper])), at: now, saidAt: now },
+            ? { what: asIs(`${tool}${target}`), at: now, saidAt: now }
+            : { what: inAll(lang => `${WORDS[lang].lending(CAST[lang].names[helper], verb(lang))}${target}`), brief: inAll(lang => WORDS[lang].withFriend(CAST[lang].names[helper])), at: now, saidAt: now },
       }
 
       if (helper !== undefined) {

@@ -86,7 +86,7 @@ const WIDE: readonly (readonly [number, number])[] = [
   [0x20000, 0x3fffd],
 ]
 
-const JOINED = /^(?:\p{M}|[‍︎️\u{1f3fb}-\u{1f3ff}])$/u
+const JOINED = /^(?:\p{M}|[\u200d\ufe0e\ufe0f\u{1f3fb}-\u{1f3ff}])$/u
 const FLAG = /^[\u{1f1e6}-\u{1f1ff}]$/u
 /** A sign a terminal draws as a picture with no selector asking for it: `✅`, `⌚`, `⏰`. */
 const PICTURED = /^\p{Emoji_Presentation}/u
@@ -102,7 +102,7 @@ const clusters = (text: string): string[] => {
 
     if (last !== undefined && (isJoining || isPair || JOINED.test(char))) units[units.length - 1] = last + char
     else units.push(char)
-    isJoining = char === '‍'
+    isJoining = char === '\u200d'
   }
 
   return units
@@ -115,7 +115,7 @@ const cellsOfCluster = (unit: string): number => {
   if (JOINED.test(String.fromCodePoint(code))) return 0
 
   // A sign in its picture form is two cells, whatever its own width: one the selector asks it of, or one drawn so unasked.
-  return unit.includes('️') || PICTURED.test(unit) || WIDE.some(([from, to]) => code >= from && code <= to) ? 2 : 1
+  return unit.includes('\ufe0f') || PICTURED.test(unit) || WIDE.some(([from, to]) => code >= from && code <= to) ? 2 : 1
 }
 
 /** Cells a string takes on a terminal row: Hangul, kana and emoji take two. */
