@@ -1,11 +1,14 @@
 {
   "name": "chiikawa",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Chiikawa mode: Hachiware conducts, and the friends from Chiikawa appear as text drawings to take on tasks and talk them over (Claude subagents + Orca workers). In English, Korean and Japanese.",
   "author": { "name": "techkwon" },
   "license": "MIT",
   "homepage": "https://github.com/techkwon/chiikawa",
   "repository": "https://github.com/techkwon/chiikawa",
+  "documentationUrl": "https://github.com/techkwon/chiikawa#readme",
+  "supportUrl": "https://github.com/techkwon/chiikawa/issues",
+  "privacyPolicyUrl": "https://github.com/techkwon/chiikawa#privacy",
   "keywords": ["mod", "subagents", "orchestration", "usage", "fan-made", "korean", "japanese"],
   "types": "./types/index.d.ts",
   "userConfig": {

@@ -123,6 +123,8 @@ const LOOPS = new Set(['while', 'until', 'for', 'select'])
 const WRAPPERS = new Set(['nohup', 'exec', 'command', 'env'])
 /** Commands whose arguments assign, where the shell has them: only where they stand alone, with no option, is no more than that done. */
 const DECLARES = new Set(['declare', 'typeset', 'local'])
+/** Every builtin whose arguments assign. Behind a word that runs the command named after it, none is sure to be the shell's own. */
+const ASSIGNERS = new Set(['export', 'readonly', ...DECLARES])
 /** Builtins that assign variables and do no more: nothing known before one is sure after it. */
 const WRITERS = new Set(['read', 'unset', 'getopts', 'mapfile', 'readarray', 'let', 'shift', 'print', 'getln', 'set'])
 /** Builtins given a count, which zsh reads as arithmetic. */
@@ -763,9 +765,11 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
           runs.push(...inner.map(one => placed(one, script, after === '&', isDetached || name === 'orca')))
         }
         // `exec` may hand the shell's own variables on, and where it stands in a shell of its own zsh goes on from it in that one too, running
-        // what follows twice; `env`, `nohup` and `timeout` run a program, which changes none; `command -v` only asks.
+        // what follows twice; `env`, `nohup` and `timeout` run a program, which changes none; `command -v` only asks. Behind any of them a
+        // builtin that assigns is not sure to assign: `command` runs it in bash and sh, and zsh looks for a program of its name.
         if (wrappers.includes('exec') && !isRun) lose(shell)
         else if (wrappers.includes('exec')) forget(shell)
+        else if (wrappers.length > 0 && ASSIGNERS.has(bareOf(words[at]) ?? '')) affect(words[at], args, shell, false)
         else if (wrappers.every(one => one === 'command') && !(wrappers.length > 0 && /^-[vV]$/.test(bareOf(words[at]) ?? ''))) affect(words[at], args, shell, isRun)
         // Yet what is assigned before a command may outlast it, as before `export` or a special builtin of `sh`: what the variable held before is not sure after.
         strike(prefixed, shell)

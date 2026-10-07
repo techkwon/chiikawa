@@ -224,38 +224,41 @@ export const shown = (quote: string): string => (isGesture(quote) ? quote : `“
 export const bare = (quote: string): string => quote.replace(/^\((.*)\)$/, '$1')
 
 /**
- * The places where the Korean cast has the very sound or gesture the Japanese
- * one has, for the friends who cannot talk: each checked by hand, a sound
- * against the original the Korean cast's own list names beside it, a gesture
- * against what it tells. Two lines that only share a place are not here, as
- * 나도! and ヤーッ!!, nor two that are one sound at different places, as 푸랴!
- * and プルャ: nothing is made of those. The English cast is the Japanese one
- * put into English place for place, so every place of those two is one line.
+ * Where the Korean cast has the very sound or gesture the Japanese one has,
+ * for the friends who cannot talk: for each occasion, the Korean place of
+ * the line at each Japanese place in turn, as far as one is known. The two
+ * need not be the same place, as わぁ～…… is the first of its occasion and
+ * 와아…… the second. Each was checked by hand, a sound against the original
+ * the Korean cast's own list names beside it, a gesture against what it
+ * tells. Two lines that only share a place are not here, as 나도! and
+ * ヤーッ!!: nothing is made of those. The English cast is the Japanese one put
+ * into English place for place, so every place of those two is one line.
  */
 const ALIKE: Readonly<Partial<Record<MemberId, Partial<Record<Situation, readonly number[]>>>>> = {
-  chiikawa: { start: [0], fail: [0], denied: [0, 1] },
-  usagi: { idle: [0, 1], start: [0, 1], fail: [0], slow: [0] },
+  chiikawa: { start: [0], done: [1], fail: [0], denied: [0, 1] },
+  usagi: { idle: [0, 1], start: [0, 1], done: [2, 3], fail: [0], slow: [0] },
   kurimanju: { idle: [0], start: [0], done: [0, 1, 2], fail: [0], slow: [0], denied: [0] },
   kani: { idle: [0, 1], start: [0], done: [0, 1], fail: [0], slow: [0], denied: [0] },
 }
 
-/** Each sound and gesture of a character as the languages have it, a place at a time: the Korean one only where it is that very line. */
+/** Each sound and gesture of a character as the languages have it, a Japanese place at a time: the Korean one only where it is that very line. */
 const voicesOf = (member: MemberId): Partial<Phrase>[] =>
   SITUATIONS.flatMap(situation =>
-    CAST.ja.quotes[member][situation].map((ja, at) => ({
-      ja,
-      en: CAST.en.quotes[member][situation][at],
-      ko: ALIKE[member]?.[situation]?.includes(at) === true ? CAST.ko.quotes[member][situation][at] : undefined,
-    })),
+    CAST.ja.quotes[member][situation].map((ja, at) => {
+      const same = ALIKE[member]?.[situation]?.[at]
+
+      return { ja, en: CAST.en.quotes[member][situation][at], ko: same === undefined ? undefined : CAST.ko.quotes[member][situation][same] }
+    }),
   )
 
 /**
- * The first line of a report as each language shows it. It is the worker's
- * own writing and stays as written, but for one case: a character that
- * cannot talk wrote one of its own sounds or gestures, letter for letter, and
- * another language has that very line and no other for it. A gesture written
- * without its parentheses is known by what it tells, and is shown without
- * them. No line is made up: a language with no such line shows the one written.
+ * What a character wrote after its own name as all its report, as each
+ * language shows it. It is the worker's own writing and stays as written,
+ * but for one case: a character that cannot talk wrote one of its own sounds
+ * or gestures, letter for letter, and another language has that very line
+ * and no other for it. A gesture written without its parentheses is known by
+ * what it tells, and is shown without them. No line is made up: a language
+ * with no such line shows the one written.
  */
 export const reported = (member: MemberId, line: string): Phrase => {
   if (MEMBERS[member].speaks) return asIs(line)

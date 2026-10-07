@@ -216,15 +216,23 @@ const lettersOf = (sound: string): string =>
     .replace(/[^\p{L}\p{N}]/gu, '')
     .replace(/(.)\1+/gu, '$1')
 
-/** How each character that cannot talk opens a report, and the sounds and gestures it is known to make. */
-const SOUNDS: readonly (readonly [RegExp, ReadonlySet<string>])[] = MUTE.map(id => [
+/** How each character that cannot talk opens a report, the sounds and gestures it is known to make, and who it is. */
+const SOUNDS: readonly (readonly [RegExp, ReadonlySet<string>, MemberId])[] = MUTE.map(id => [
   new RegExp(`${MARKED}(?:${namesOf(id).join('|')})\\s*[:：]`, 'u'),
   new Set(
     LANGS.flatMap(lang => soundsOf(lang, id))
       .map(lettersOf)
       .filter(letters => letters !== ''),
   ),
+  id,
 ])
+
+/** The lines of a report that say something, without the markup each opens with. */
+const saidIn = (text: string): string[] =>
+  text
+    .split('\n')
+    .map(one => one.replace(/^[\s#>*\-`]+/, '').trim())
+    .filter(one => one !== '' && !/^[-=_*`]+$/.test(one))
 
 /**
  * The first lines of a report that say something, without their markup and
@@ -235,11 +243,7 @@ const SOUNDS: readonly (readonly [RegExp, ReadonlySet<string>])[] = MUTE.map(id 
  * as is all a character that talks says.
  */
 export const firstLines = (text: string, count: number): string[] => {
-  const said = text
-    .split('\n')
-    .map(one => one.replace(/^[\s#>*\-`]+/, '').trim())
-    .filter(one => one !== '' && !/^[-=_*`]+$/.test(one))
-  const [first = '', ...more] = said
+  const [first = '', ...more] = saidIn(text)
   const rest = first.replace(OPENING, '')
   const sounds = SOUNDS.find(([opening]) => opening.test(first))?.[1]
   const isSound = sounds !== undefined && more.length > 0 && sounds.has(lettersOf(rest))
@@ -252,3 +256,16 @@ export const firstLines = (text: string, count: number): string[] => {
 
 /** The first line of a report that says something. */
 export const firstLine = (text: string): string => firstLines(text, 1)[0] ?? ''
+
+/**
+ * The friend who cannot talk whose name a report of one line opens with, as
+ * its block has it open a report: what stands after the name there is the
+ * one place a sound or a gesture of its own is the report itself. Under such
+ * a line the lines are what the task came to, and so is a first line that
+ * opens with no such name: neither is anyone's sound, whatever it reads like.
+ */
+export const openerOf = (text: string): MemberId | undefined => {
+  const [first = '', ...more] = saidIn(text)
+
+  return more.length > 0 ? undefined : SOUNDS.find(([opening]) => opening.test(first))?.[2]
+}

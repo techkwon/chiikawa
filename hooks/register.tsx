@@ -9,7 +9,7 @@ import type { FleetRun } from './orca'
 import { findFleetRuns, readMeta, voicedSpecPath } from './orca'
 import type { Kit, Scene } from './view'
 import { AID_MS, drawBand, drawPane, lastSaid, plus, rosterLines, talkLines, usageLines, ZERO } from './view'
-import { castIn, firstLines, fleetNote, isMarked, leaderSection, memberBlock, memberNamed, namedMember, orcaBlock, pickNote, roleNamed, roleNote, standDown, tookNote, unvoiced } from './voice'
+import { castIn, firstLines, fleetNote, isMarked, leaderSection, memberBlock, memberNamed, namedMember, openerOf, orcaBlock, pickNote, roleNamed, roleNote, standDown, tookNote, unvoiced } from './voice'
 import type { LangFrom, Words } from './words'
 import { asIs, inAll, isSaid, LANG_NAMES, langKeptFrom, langNamed, LANGS, configLang, localeLang, typedLang, WORDS } from './words'
 
@@ -91,6 +91,8 @@ type Outcome = {
   report?: Phrase
   /** The first lines of what it handed back: the first is its report. */
   summary?: string[]
+  /** The friend who cannot talk whose name opens what it handed back, where that is one line and no more. */
+  opener?: MemberId
   /** Read off the engine's list, not told by the task's own turn. */
   isGuessed?: boolean
 }
@@ -452,10 +454,18 @@ const gainOf = (task: Task, tokens: Tokens | undefined): Tokens | undefined => {
 
 /**
  * What a task has handed back, with an end's word of it in: what the mode
- * itself has it hand back, else the first line the worker wrote, a sound or
- * a gesture of the character's own as each language has it, else what it had.
+ * itself has it hand back, else the first line the worker wrote, else what
+ * it had. The worker's line stands as written in every language, but for the
+ * one line a character wrote after its own name as all its report: a sound
+ * or a gesture of its own there is as each language has it.
  */
-const toldOf = (task: Task, { report, summary }: Outcome): Phrase | undefined => report ?? (summary?.[0] === undefined ? task.report : reported(task.member, summary[0]))
+const toldOf = (task: Task, { report, summary, opener }: Outcome): Phrase | undefined => {
+  const [first] = summary ?? []
+
+  if (report !== undefined || first === undefined) return report ?? task.report
+
+  return opener === task.member ? reported(task.member, first) : asIs(first)
+}
 
 /** The task as it stands once ended that way: the character's line for it, how long it took, what it handed back. */
 const endOf = (task: Task, outcome: Outcome, now: number): Task => {
@@ -710,9 +720,9 @@ const pollWorker = async ($: Engine, task: Task): Promise<void> => {
   const meta = readMeta(text, WORDS.en)
 
   if (meta === undefined) return
-  const summary = firstLines(await $.fs.read(task.out).catch(() => ''), SUMMARY_LINES)
+  const handed = await $.fs.read(task.out).catch(() => '')
 
-  await settle($, task.id, { isOk: meta.isOk, why: words => readMeta(text, words)?.note ?? '', tokens: meta.tokens, summary })
+  await settle($, task.id, { isOk: meta.isOk, why: words => readMeta(text, words)?.note ?? '', tokens: meta.tokens, summary: firstLines(handed, SUMMARY_LINES), opener: openerOf(handed) })
 }
 
 /**
@@ -1415,6 +1425,8 @@ export const register: Register = (on, options) => {
 
     // The letters turned the screen to another language: the person is told so once, in that language, with the way back, and where it could not be kept.
     if (typed?.isNews === true && spoke !== was && isModeOn) $.ui.toast(WORDS[spoke].langTyped(LANG_NAMES[spoke], was, typed.isKept))
+    // They told the language the screen was in already: nothing turned, and that it is theirs from now on and could not be kept is told all the same, once.
+    else if (typed?.isNews === true && !typed.isKept && isModeOn && (await settledLang($)).from === 'typed') $.ui.toast(`${WORDS[spoke].langNow(LANG_NAMES[spoke], 'typed')} ${WORDS[spoke].unkept}`)
     if (words.length === 0) return next(e)
     const sent = await next({ ...e, context: [...(e.context ?? []), ...words] })
 
@@ -1592,7 +1604,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) {
       const why = ENDS[e.reason]
 
-      await finish($, e.agentId, e.turnId, { isOk: e.reason === 'answer', ...(why === undefined ? {} : { why }), tokens: spent, summary: firstLines(e.answer, SUMMARY_LINES) }).catch(() => undefined)
+      await finish($, e.agentId, e.turnId, { isOk: e.reason === 'answer', ...(why === undefined ? {} : { why }), tokens: spent, summary: firstLines(e.answer, SUMMARY_LINES), opener: openerOf(e.answer) }).catch(() => undefined)
     } else if (await read($, isOn).catch(() => false)) {
       if (spent !== undefined) await update($, leaderTokens, total => plus(total, spent))
       await refreshUsage($).catch(() => undefined)

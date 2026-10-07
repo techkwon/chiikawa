@@ -690,6 +690,8 @@ const SURE: readonly (readonly [string, ...string[]])[] = [
   ['X=/fixture/a.md; NOW=$(date +%s); echo "$(X=/fixture/b.md)"; fleet-run codex-build --spec "$X"', 'codex-build /fixture/a.md $X - waited'],
   ["X=/fixture/a.md; cat > /fixture/note.md <<'EOF'\nX=/fixture/b.md; : $((X=2))\nEOF\nfleet-run codex-build --spec \"$X\"", 'codex-build /fixture/a.md $X - waited'],
   ['set -euo pipefail; X=/fixture/a.md; fleet-run codex-build --spec "$X"', 'codex-build /fixture/a.md $X - waited'],
+  // What stands behind `command` and is not sure to have assigned seals nothing: an assignment after it is read.
+  ['X=/fixture/a.md; command export X=/fixture/b.md; X=/fixture/c.md; fleet-run codex-build --spec "$X"', 'codex-build /fixture/c.md $X - waited'],
   // Behind what runs the command named after it, in the background, and in a script handed on.
   ['X=/fixture/a.md; nohup fleet-run codex-build --spec "$X" > /fixture/log 2>&1 &', 'codex-build /fixture/a.md $X - away'],
   ['X=/fixture/a.md; timeout 600 fleet-run codex-build --spec "$X"', 'codex-build /fixture/a.md $X - waited'],
@@ -739,6 +741,30 @@ const CHANGING: readonly string[] = [
   'typeset -u X',
   'local X=/fixture/b.md',
   'true {X}>/dev/null',
+  // A builtin that assigns, behind a word that runs the command named after it: bash and sh run it behind `command`, where zsh looks
+  // for a program of its name and assigns nothing. Behind any such word it is not read as an assignment, whichever shell would make it.
+  'command export X=/fixture/b.md',
+  'command readonly X=/fixture/b.md',
+  'command command export X=/fixture/b.md',
+  'command export X=/fixture/b.md Y=/fixture/c.md',
+  'Y=/fixture/c.md command export X=/fixture/b.md',
+  '\\command export X=/fixture/b.md',
+  '/usr/bin/command export X=/fixture/b.md',
+  'command declare X=/fixture/b.md',
+  'command typeset X=/fixture/b.md',
+  'command local X=/fixture/b.md',
+  'builtin export X=/fixture/b.md',
+  'builtin readonly X=/fixture/b.md',
+  'command builtin export X=/fixture/b.md',
+  'exec export X=/fixture/b.md',
+  'env export X=/fixture/b.md',
+  'env readonly X=/fixture/b.md',
+  'nohup export X=/fixture/b.md',
+  'nohup typeset X=/fixture/b.md',
+  'timeout 5 export X=/fixture/b.md',
+  'time export X=/fixture/b.md',
+  'noglob export X=/fixture/b.md',
+  'nocorrect readonly X=/fixture/b.md',
   // What may run anything, or change how the shell reads.
   'eval X=/fixture/b.md',
   'source /fixture/env.sh',
@@ -813,6 +839,9 @@ const UNSURE: readonly string[] = [
   "X=/fixture/a.md; sh -c 'fleet-run codex-build --spec $X'",
   'P="/fixture/a b"; orca terminal create --command "fleet-run codex-build --spec $P.md"',
   'X=/fixture/a.md; X=/fixture/b.md | true; fleet-run codex-build --spec "$X" --out "$X.out"',
+  // `readonly` behind `command` seals the variable in bash and sh, and not in zsh: an assignment after it is made in zsh alone.
+  'X=/fixture/a.md; command readonly X=/fixture/b.md; X=/fixture/c.md; fleet-run codex-build --spec "$X" --out "$X.out"',
+  'command readonly X=/fixture/a.md; X=/fixture/b.md; fleet-run codex-build --spec "$X"',
   // zsh goes on from an `exec` of redirections alone in the shell it was put in as well: what follows is run twice.
   'exec 3>&1 & X=/fixture/b.md; fleet-run codex-build --spec "$X"',
   'exec 3>&1 | cat; X=/fixture/b.md; fleet-run codex-build --spec "$X"',

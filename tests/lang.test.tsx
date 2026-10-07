@@ -585,6 +585,43 @@ test('lines said in one language are shown in whichever language the screen turn
   await run($, 'clear all')
 })
 
+test("what a report says under its opening sound, and a first line with no name before it, stay as written though they read like the friend's own sound or gesture", { options: { language: 'auto', animate: false } }, async ($, on) => {
+  const { kept, clock } = world(on)
+  const box = { spawned: 0 }
+
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `agent_${(box.spawned += 1)}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  kept.set('lang', {})
+  await $.session.start(START)
+  await run($, 'lang en')
+
+  // One opens with its sound and goes on to a heading that reads the same; the other wrote one line, with no name before it, that reads like a gesture of its own.
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_1', description: 'Usagi: find the product name' })
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2', description: 'Furuhonya: say what the first note asks for' })
+  await clock.advance(2000)
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '🐰 Usagi: Ura!\n# Ura!\nThe heading above is the literal product name.', agentId: 'agent_1', reason: 'answer' })
+  await $.turn.complete({ ...DONE, turnId: 'turn_2', answer: 'reads a book aloud', agentId: 'agent_2', reason: 'answer' })
+
+  const has = (drawn: readonly string[], piece: string): string => `${piece} ${String(drawn.some(text => text.includes(piece)))}`
+
+  for (const [lang, label, sound, gesture] of [['en', 'Report', 'Ura!', 'reads a book aloud'], ['ko', '보고', '우라', '책을 읽어 준다'], ['ja', '報告', 'ウラ', '本を読み聞かせる']] as const) {
+    await run($, `lang ${lang}`)
+    const usagi = await pages($, 'usagi')
+    const kani = await pages($, 'kani')
+
+    // On the cut and on the sheet the heading is the one written, with the line under it: it is what the task came to, and no sound.
+    expect(has(usagi, '↳ Ura!')).toBe('↳ Ura! true')
+    expect(`${lang} ${usagi.filter(text => new RegExp(`^${label} +Ura!$`).test(text)).length}`).toBe(`${lang} 1`)
+    expect(`${lang} ${usagi.filter(text => /^ *The heading above is the literal product name\.$/.test(text)).length}`).toBe(`${lang} 1`)
+    expect(has(kani, '↳ reads a book aloud')).toBe('↳ reads a book aloud true')
+    expect(`${lang} ${kani.filter(text => new RegExp(`^${label} +reads a book aloud$`).test(text)).length}`).toBe(`${lang} 1`)
+    // Nothing of either is shown as the friend's own line in this language.
+    if (lang !== 'en') for (const piece of [`↳ ${sound}`, `↳ ${gesture}`]) expect(has([...usagi, ...kani], piece)).toBe(`${piece} false`)
+  }
+  await run($, 'lang auto')
+  await run($, 'clear all')
+})
+
 test("a demonstration's tasks are named, told of and reported in the language the screen turns to", AUTO, async ($, on) => {
   const { kept, clock } = world(on)
 
@@ -1130,6 +1167,48 @@ test('a language told by the letters that could not be saved is said to hold for
   kept.set('lang', {})
   await enter($, 'hello again')
   expect(kept.get('lang')).toEqual({})
+  await run($, 'lang auto')
+  await run($, 'clear all')
+})
+
+test('a language told by the letters that the screen was in already is said to hold for this session only where it could not be saved: once, though nothing turned', AUTO, async ($, on) => {
+  const { kept, env, set, toasts } = world(on)
+
+  // The environment has the screen in Korean before anything is typed.
+  env.LANG = 'ko_KR.UTF-8'
+  kept.set('lang', {})
+  await $.session.start(START)
+  await run($, 'on')
+  expect(await screen($)).toBe(RESTING.ko)
+  toasts.length = 0
+
+  // The first Korean prompt turns nothing, and its language cannot be written down: that is told by itself.
+  set.isStoreClosed = true
+  await enter($, '안녕하세요')
+  expect(await screen($)).toBe(RESTING.ko)
+  expect(toasts).toEqual(['지금 언어는 한국어예요. 입력한 프롬프트의 글자를 보고 정했어요. 저장하지는 못해서 이번 세션에만 적용돼요.'])
+  expect(kept.get('lang')).toEqual({})
+  // More of the same language is no news: the save tried again with it fails as quietly, and holds as quietly once it can.
+  await enter($, '로그인 버그를 고쳐 줘')
+  expect(toasts).toHaveLength(1)
+  expect(kept.get('lang')).toEqual({})
+  set.isStoreClosed = false
+  await enter($, 'hello')
+  expect(kept.get('lang')).toEqual({ typed: 'ko' })
+  expect(toasts).toHaveLength(1)
+
+  // Where it is kept there is nothing to tell: the screen did not turn, and nothing is for this session only.
+  await run($, 'lang auto')
+  await enter($, '다시 한국어로 할게')
+  expect(kept.get('lang')).toEqual({ typed: 'ko' })
+  expect(toasts).toHaveLength(1)
+  // Under a language the person chose, the letters settle nothing: what is noted of them is not what holds, and nothing is said of it.
+  await run($, 'lang ko')
+  set.isStoreClosed = true
+  await enter($, 'ログインのバグを直して')
+  expect(await screen($)).toBe(RESTING.ko)
+  expect(toasts).toHaveLength(1)
+  set.isStoreClosed = false
   await run($, 'lang auto')
   await run($, 'clear all')
 })
