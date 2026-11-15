@@ -354,22 +354,38 @@ export const rolesFrom = (kept: unknown): Roles => {
   }, {})
 }
 
+/** The two who take the work first, beside 하치와레, who hands it out: the guests come only when both have work. */
+export const MAIN_WORKERS: readonly MemberId[] = ['chiikawa', 'usagi']
+
 /**
- * The specialist, or the role's own character, or while that one is busy the
- * next with free hands. A specialty is a kind of work, so its character comes
- * before one the person gave the role; that one comes before those whose own
- * the role is; one given another role leaves this one, and its specialty too.
+ * Who takes a task: first one the person gave the role, if its hands are
+ * free; else 치이카와 or 우사기 while either has free hands and no other role
+ * given (우사기 first for finding and looking things up, 치이카와 for the
+ * rest). With both
+ * at work a guest comes: the specialist, or the role's own character, or the
+ * next with free hands; one given another role leaves this one, and its
+ * specialty too.
+ * With every hand full, the main one whose turn it is takes one more.
  */
 export const pickMember = (role: Role, tasks: readonly Task[], specialist?: MemberId, roles: Roles = {}): MemberId => {
   const wanted = role === '지휘' ? '구현' : role
+  const isFree = (id: MemberId): boolean => !tasks.some(task => task.member === id && isActive(task))
+  const main = wanted === '탐색' || wanted === '조사' ? ['usagi', 'chiikawa'] as const : ['chiikawa', 'usagi'] as const
   const given = WORKERS.filter(id => roles[id] === wanted)
+  // One the person gave this role comes first: they asked for it by name.
+  const freeGiven = given.find(isFree)
+
+  if (freeGiven !== undefined) return freeGiven
+  const freeMain = main.find(id => isFree(id) && (roles[id] === undefined || roles[id] === wanted))
+
+  if (freeMain !== undefined) return freeMain
   const stayed = PREFERENCE[wanted].filter(id => roles[id] === undefined)
   const own = given.length + stayed.length > 0 ? [...given, ...stayed] : PREFERENCE[wanted]
   const first = specialist !== undefined && roles[specialist] === undefined ? specialist : undefined
-  const order = first === undefined ? own : [first, ...own.filter(id => id !== first)]
-  const free = order.find(id => !tasks.some(task => task.member === id && isActive(task)))
+  const order = (first === undefined ? own : [first, ...own.filter(id => id !== first)]).filter(id => !MAIN_WORKERS.includes(id))
+  const guests = [...order, ...WORKERS.filter(id => !MAIN_WORKERS.includes(id) && !order.includes(id))]
 
-  return free ?? order[0] ?? 'shisa'
+  return guests.find(isFree) ?? main[0]
 }
 
 // A kind that looks things up is not one that finds a place, whatever else its name holds: the first test that fits wins.

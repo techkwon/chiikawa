@@ -11,6 +11,8 @@ export type MemberId =
   | 'rodo'
 /** The languages the screen and the characters' voices come in. */
 export type Lang = 'en' | 'ko' | 'ja'
+/** The person's pictures, as data URIs by friend and by state (`base` for a state without its own). */
+export type PictureTable = Partial<Record<MemberId, Partial<Record<string, string>>>>
 /**
  * Words the mode says, in every language, made when they were said: the
  * screen shows the ones of the language it is in just then. Words that are
@@ -40,9 +42,9 @@ export type Tokens = {
 }
 
 export type Task = {
-  /** An agent's id, `spawn:<tool_use_id>` until it is known, or `orca:<id>`. */
+  /** An agent's id, `spawn:<tool_use_id>` until it is known, `orca:<id>`, or `shell:<background task id>` for a command run in the background. */
   id: string
-  kind: 'agent' | 'orca'
+  kind: 'agent' | 'orca' | 'shell'
   member: MemberId
   role: Role
   /** The subagent type, or the fleet-run profile. */
@@ -88,6 +90,8 @@ export type Aid = {
   brief?: Phrase
   at: number
   saidAt: number
+  /** When the stretch of lent hands this is part of began, for the time its chip shows. */
+  since?: number
 }
 export type Aids = Partial<Record<MemberId, Aid>>
 
@@ -142,10 +146,16 @@ declare module 'claude-code' {
       isLight: boolean
       /** The drawings' frame, counted on while a character is at work. */
       frame: number
+      /** The person's own pictures, as data URIs by friend and state: drawings read them here, never from the module, which the band may be drawn without. */
+      pictures: PictureTable
       /** The hands the three lend to the main loop's own work. */
       aids: Aids
       /** Whether the pane shows the usage in full: it does until the person puts it away. */
       isUsageOpen: boolean
+      /** Whether the band shows the friends to send the next prompt to, each with what it is good at. */
+      isPicking: boolean
+      /** Whether a demonstration was turned on to stay at work until it is turned off. */
+      isDemoHeld: boolean
       /** How many lines back from the last the pane's conversation is turned; 0 shows the last ones. */
       talkBack: number
       /** Whether the pane shows the conversation alone. */

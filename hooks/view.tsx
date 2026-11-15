@@ -45,7 +45,7 @@ export type Room = { columns: number; rows: number }
 /** Shows one character's task in full, or with `null` puts it away. */
 export type OnWatch = (id: MemberId | null) => void
 
-const MARK: Record<Task['status'], string> = { running: '●', waiting: '◐', done: '✓', failed: '✗' }
+export const MARK: Record<Task['status'], string> = { running: '●', waiting: '◐', done: '✓', failed: '✗' }
 const TINT: Record<Task['status'], Color | undefined> = {
   running: undefined,
   waiting: 'warning',
@@ -205,9 +205,9 @@ export const lastSaid = (scene: Pick<Scene, 'feed'>, id?: MemberId): Said | unde
 const isRunning = (task: Task): boolean => task.status === 'running'
 
 /** The ones at work. One whose task waits, on an answer or on a result that has not come, is not: it rests until it goes on. */
-const busyOf = (scene: Scene): MemberId[] => WORKERS.filter(id => scene.tasks.some(task => task.member === id && isRunning(task)))
+export const busyOf = (scene: Scene): MemberId[] => WORKERS.filter(id => scene.tasks.some(task => task.member === id && isRunning(task)))
 
-const waitingOf = (scene: Scene): MemberId[] => WORKERS.filter(id => !scene.tasks.some(task => task.member === id && isRunning(task)) && scene.tasks.some(task => task.member === id && isActive(task)))
+export const waitingOf = (scene: Scene): MemberId[] => WORKERS.filter(id => !scene.tasks.some(task => task.member === id && isRunning(task)) && scene.tasks.some(task => task.member === id && isActive(task)))
 
 /** Whether a character is at work: one with a task in hand or lending a hand, and 하치와레 while anyone has a task. */
 const isAtWork = (scene: Scene, id: MemberId): boolean => aidOf(scene, id) !== undefined || scene.tasks.some(task => isRunning(task) && (id === LEAD || task.member === id))
@@ -283,7 +283,7 @@ const isSpent = (tokens: Tokens): boolean => tokens.fresh + tokens.cached + toke
 /** When a window resets, as the language says it. */
 export const until = (lang: Lang, at: number, now: number): string => WORDS[lang].until(Math.max(0, Math.round((at - now) / 60_000)))
 
-const bar = (percent: number): string => {
+export const bar = (percent: number): string => {
   const lit = percent <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(percent / 10)))
 
   return '▰'.repeat(lit) + '▱'.repeat(10 - lit)
@@ -307,7 +307,7 @@ type Meter = { label: string; percent: number; tint: Color; text: string }
 /** The cells a meter's label takes with the cell after it: the widest the language has. */
 const labelCells = (words: Words): number => Math.max(cells(words.battery), ...Object.values(words.limits).map(cells)) + 1
 
-const metersOf = (scene: Scene): Meter[] => {
+export const metersOf = (scene: Scene): Meter[] => {
   const { usage } = scene
   const words = wordsOf(scene)
   const free = batteryOf(usage)
@@ -335,7 +335,7 @@ const metersOf = (scene: Scene): Meter[] => {
   return meters
 }
 
-const spendersOf = (scene: Scene): MemberId[] => {
+export const spendersOf = (scene: Scene): MemberId[] => {
   const by = spentBy(scene)
 
   return ORDER.filter(id => isSpent(by[id]))
@@ -414,7 +414,7 @@ const TalkRow = (kit: Kit, lang: Lang, said: Said, width: number, key: string): 
 }
 
 /** What stands for the conversation before anything was said: 하치와레, waiting for work. */
-const waitingSaid: Said = { member: LEAD, quote: inAll(lang => CAST[lang].leader.idle), note: inAll(lang => WORDS[lang].awaiting), at: 0, mood: 'calm' }
+export const waitingSaid: Said = { member: LEAD, quote: inAll(lang => CAST[lang].leader.idle), note: inAll(lang => WORDS[lang].awaiting), at: 0, mood: 'calm' }
 
 /** The last lines of the conversation, oldest first, beside the picture of whoever spoke last. */
 const Talk = (kit: Kit, scene: Scene, width: number, lines: number, withPicture: boolean): RenderElement => {
@@ -504,7 +504,7 @@ const Cut = (kit: Kit, lang: Lang, said: Said, width: number, isTurned: boolean,
 }
 
 /** Which lines of the conversation a page of `count` cuts holds, turned back as far as the person turned it. */
-const shownOf = (scene: Scene, count: number): { from: number; to: number } => {
+export const shownOf = (scene: Scene, count: number): { from: number; to: number } => {
   const size = Math.max(1, count)
   const to = Math.max(Math.min(size, scene.feed.length), scene.feed.length - Math.max(0, scene.talkBack))
 
@@ -553,11 +553,17 @@ type Seat = {
 }
 
 const SEAT_GAP = 2
-const GUESTS: readonly MemberId[] = WORKERS.filter(id => !CORE.includes(id))
+export const GUESTS: readonly MemberId[] = WORKERS.filter(id => !CORE.includes(id))
 
-const seatOf = (scene: Scene, stage: readonly Task[], id: MemberId): Seat => {
-  const task = id === LEAD ? stage.find(isRunning) : stage.find(one => one.member === id)
-  const isHelping = aidOf(scene, id) !== undefined && (task === undefined || !isActive(task))
+/** How long an ended task's mark stays by its friend in the band: long enough to be seen, not so long it reads as now. */
+export const ENDED_MS = 30_000
+
+export const seatOf = (scene: Scene, stage: readonly Task[], id: MemberId): Seat => {
+  const found = id === LEAD ? stage.find(isRunning) : stage.find(one => one.member === id)
+  // A task ended a while ago no longer marks its friend: the ✓ or ✗ goes, and the friend sits as resting.
+  const task = found !== undefined && !isActive(found) && found.endedAt !== undefined && scene.now - found.endedAt > ENDED_MS ? undefined : found
+  const helping = aidOf(scene, id)
+  const isHelping = helping !== undefined && (task === undefined || !isActive(task))
   // One that waits keeps its mark and its time, and is counted with the ones resting.
   const isBusy = isHelping || (task !== undefined && isRunning(task))
   const isPicked = scene.picked === id
@@ -568,7 +574,8 @@ const seatOf = (scene: Scene, stage: readonly Task[], id: MemberId): Seat => {
     isRunning: isHelping || (task !== undefined && (id === LEAD || task.status === 'running')),
     tint: isHelping || task === undefined || id === LEAD ? undefined : TINT[task.status],
     label: `${isPicked ? '▶' : ''}${shortName(scene.lang, id)}`,
-    time: id !== LEAD && task !== undefined && isActive(task) ? ` ${clock(elapsed(task, scene.now))}` : '',
+    // Every friend at work shows how long it has been at it: its own task's time, or the stretch of hands it lends the main loop.
+    time: isHelping ? ` ${clock(Math.max(0, scene.now - (helping?.since ?? helping?.at ?? scene.now)))}` : task !== undefined && isActive(task) ? ` ${clock(elapsed(task, scene.now))}` : '',
     isBusy,
     isDim: !isPicked && !isBusy,
   }
@@ -705,7 +712,7 @@ export type PaneActs = {
   onRole: (id: MemberId, role: WorkRole) => void
 }
 
-type Card = {
+export type Card = {
   id: MemberId
   name: string
   sub: string
@@ -745,7 +752,7 @@ const doingOf = (words: Words, task: Task): string => {
   return task.tool === undefined ? '' : `▸ ${task.tool}${on} · ${words.tools(task.toolCount)}`
 }
 
-const cardOf = (id: MemberId, scene: Scene): Card => {
+export const cardOf = (id: MemberId, scene: Scene): Card => {
   const words = wordsOf(scene)
   const { lang } = scene
   const cast = CAST[lang]
@@ -983,7 +990,7 @@ const Rule = (kit: Kit, label: string, width: number): RenderElement => {
 // ---- the sheet: what one character is doing, for the one who pressed its name
 
 type SheetRow = { label: string; text: string; tint?: Color; isPath?: boolean }
-type Sheet = { id: MemberId; rows: SheetRow[]; canPick: boolean }
+export type Sheet = { id: MemberId; rows: SheetRow[]; canPick: boolean }
 
 /** Tasks in hand a sheet tells one by one before it counts the rest. */
 const LISTED = 3
@@ -1013,7 +1020,7 @@ const saidRows = (scene: Scene, id: MemberId): SheetRow[] =>
     .map((one, index) => ({ label: index === 0 ? wordsOf(scene).labels.said : '', text: `${shown(one.quote[scene.lang])}${one.note[scene.lang] === '' ? '' : ` ${one.note[scene.lang]}`}` }))
 
 /** The sheet of the character the person asked about; none where they asked about no one. */
-const sheetOf = (scene: Scene): Sheet | undefined => {
+export const sheetOf = (scene: Scene): Sheet | undefined => {
   const id = scene.watched
   const { lang } = scene
 
@@ -1062,7 +1069,7 @@ const sheetOf = (scene: Scene): Sheet | undefined => {
 }
 
 /** Only one who takes tasks has a role the person can change. */
-const hasRole = (id: MemberId): boolean => WORKERS.includes(id)
+export const hasRole = (id: MemberId): boolean => WORKERS.includes(id)
 
 /** A role to give, as its button is labeled. */
 type RoleButton = { role: WorkRole; label: string }

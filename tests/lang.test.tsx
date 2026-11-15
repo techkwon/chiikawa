@@ -1105,7 +1105,8 @@ test('a session starting shares its read of what is kept with a command that arr
   first()
   await started
   await chosen
-  expect(reads).toEqual(['lang', 'roles'])
+  // The desktop look's own choice is read once the mode's kept values are in.
+  expect(reads).toEqual(['lang', 'roles', 'look'])
   expect(await screen($)).toBe(RESTING.ja)
   expect(kept.get('lang')).toEqual({ chosen: 'ja' })
 

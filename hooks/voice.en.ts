@@ -103,7 +103,7 @@ ${lines}
         ? `The user put every friend back to the original role. All of them now have their own role: ${own}.`
         : `The user changed the friends' roles. The roles changed now: ${changed}.${own === undefined ? '' : ` The other friends have their own role: ${own}.`}`
 
-    return `${CHANGED} ${now} Follow these roles when handing out work. However, work that has a specialist (${specialties}) goes to that specialist first whatever the roles, unless the specialist's own role was changed.`
+    return `${CHANGED} ${now} Follow these roles when handing out work. Where no friend was given the role, or that one is busy, Chiikawa and Usagi take the work first, and a guest friend comes only while both are at work. Among the guests, work that has a specialist (${specialties}) goes to that specialist first, unless the specialist's own role was changed.`
   },
 
   took: (name, role, speaks) =>

@@ -37,7 +37,8 @@ test('a spawned subagent is handed to a character; the band shows the last line 
     return { model: 'claude-sonnet-5-5', agentId: `agent_${seen.length}` }
   })
 
-  await $.agent.spawn(SPAWN)
+  // Two guests, by name: the main two would take unnamed work first.
+  await $.agent.spawn({ ...SPAWN, description: '시사: 로그인 폼 구현' })
   await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2', description: '쿠리만쥬: 바뀐 코드 다시 보기' })
 
   expect(seen[0]?.description).toBe('🦁 시사 · 로그인 폼 구현')
@@ -204,7 +205,7 @@ test('a role given on the sheet or by name changes who takes that work, is kept,
   expect(kept.get('roles')).toEqual({})
 })
 
-test('the kind of work picks the character: screens to 포쉐트 갑옷 씨, a named one to itself', KO, async ($, on) => {
+test('the kind of work picks the character: the main two first, screens to 포쉐트 갑옷 씨 once both are busy, a named one to itself', KO, async ($, on) => {
   mock.clock(on, { now: 1000 })
   const seen: AgentSpawnInput[] = []
 
@@ -214,12 +215,22 @@ test('the kind of work picks the character: screens to 포쉐트 갑옷 씨, a n
     return { model: 'claude-sonnet-5-5', agentId: `agent_${seen.length}` }
   })
 
-  await $.agent.spawn({ ...SPAWN, subagentType: 'frontend-architect', description: '설정 화면 만들기' })
-  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2', description: '랏코: 로그인 버그 토벌' })
-  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_3', description: '함수 이름 고치기', model: 'claude-haiku-4-5' })
+  // Small work and a screen go to the main two while either has free hands, the specialty or not.
+  await $.agent.spawn({ ...SPAWN, description: '함수 이름 고치기', model: 'claude-haiku-4-5' })
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2', subagentType: 'frontend-architect', description: '설정 화면 만들기' })
+  // With both at work, the screen goes to its specialist, and other work to the role's own guest.
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_3', subagentType: 'frontend-architect', description: '설정 화면 다듬기' })
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_4', description: '랏코: 로그인 버그 토벌' })
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_5', description: '로그인 폼 구현' })
 
-  expect(seen.map(e => e.description)).toEqual(['👛 포쉐트 갑옷 씨 · 설정 화면 만들기', '🦦 랏코 · 로그인 버그 토벌', '🐹 치이카와 · 함수 이름 고치기'])
-  expect(seen[1]?.prompt).toContain('"온다!"')
+  expect(seen.map(e => e.description)).toEqual([
+    '🐹 치이카와 · 함수 이름 고치기',
+    '🐰 우사기 · 설정 화면 만들기',
+    '👛 포쉐트 갑옷 씨 · 설정 화면 다듬기',
+    '🦦 랏코 · 로그인 버그 토벌',
+    '🦁 시사 · 로그인 폼 구현',
+  ])
+  expect(seen[3]?.prompt).toContain('"온다!"')
 })
 
 test("a character's turn ending ends its task, with what it cost and what 하치와레 makes of it", KO, async ($, on) => {
@@ -411,7 +422,7 @@ test('the main loop is told beside the first typed prompt that it conducts, once
 
 test('the beat ends a character the engine lists as done, and a slow one is grumbled at by 모몽가', KO, async ($, on) => {
   const clock = mock.clock(on, { now: 1000 })
-  const listed = [{ id: 'agent_1', description: '🦁 시사 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' }]
+  const listed = [{ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' }]
   const opened: string[] = []
 
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
@@ -435,12 +446,12 @@ test('the beat ends a character the engine lists as done, and a slow one is grum
 
   const slow = await $.command.run({ command: 'chiikawa', args: '', ...RUN })
 
-  expect(slow.text).toContain('🦁 시사 (구현) ● 작업 중 3:0')
+  expect(slow.text).toContain('🐹 치이카와 (구현) ● 작업 중 3:0')
   expect(slow.text).toContain('모몽가: “배고파서 기분이 좀 안 좋아!!!”')
 
   const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE })
 
-  expect(await pane.find({ type: 'Text', text: /^피곤해도 계속한다$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^우우···$/ })).toBeDefined()
   // 모몽가 spoke last and is tired of waiting.
   expect(await pane.find({ type: 'Text', text: /^\( -A- \)$/ })).toBeDefined()
   await pane.unmount()
@@ -452,7 +463,7 @@ test('the beat ends a character the engine lists as done, and a slow one is grum
 
   const done = await $.command.run({ command: 'chiikawa', args: '', ...RUN })
 
-  expect(done.text).toContain('🦁 시사 (구현) ✓ 끝')
+  expect(done.text).toContain('🐹 치이카와 (구현) ✓ 끝')
 })
 
 const START = { cwd: '/w', surface: 'terminal', isInteractive: true } as const
@@ -611,11 +622,38 @@ test('a demonstration is ended by the beat, so the session starting again in the
   await $.command.run({ command: 'chiikawa', args: 'clear', ...RUN })
 })
 
+test('a demonstration turned on stays at work until it is turned off, and then each ends as it would have', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+
+  await $.session.start(START)
+  expect((await $.command.run({ command: 'chiikawa', args: 'demo off', ...RUN })).text).toContain('켜 둔 시연이 없어요')
+  expect((await $.command.run({ command: 'chiikawa', args: 'demo on', ...RUN })).text).toContain('demo off')
+  // Long past when each would have ended, all four are still at work.
+  await clock.advance(60_000)
+  const held = await $.command.run({ command: 'chiikawa', args: '', ...RUN })
+
+  expect(held.text).not.toContain('✓ 끝')
+  expect(held.text).not.toContain('✗ 실패')
+
+  expect((await $.command.run({ command: 'chiikawa', args: 'demo off', ...RUN })).text).toContain('시연을 껐어요')
+  const after = await $.command.run({ command: 'chiikawa', args: '', ...RUN })
+
+  expect(after.text).toContain('🐰 우사기 (탐색) ✓ 끝')
+  expect(after.text).toContain('🐹 치이카와 (구현) ✗ 실패')
+  expect(after.text).toContain('🌰 쿠리만쥬 (검토) ✓ 끝')
+  await $.command.run({ command: 'chiikawa', args: 'clear', ...RUN })
+})
+
 test('two tasks of one name are each given their own agent, and one ending ends one', KO, async ($, on) => {
   const clock = mock.clock(on, { now: 1000 })
   const listed = [
-    { id: 'agent_a', description: '🦁 시사 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' },
-    { id: 'agent_b', description: '🦦 랏코 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' },
+    { id: 'agent_a', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' },
+    { id: 'agent_b', description: '🐰 우사기 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' },
   ]
 
   // The spawn answers no id: the beat finds each task its row in the list.
@@ -650,7 +688,7 @@ test('a list that cannot be read ends nobody, and a guess is overruled by the ta
   on('agent.list', () => {
     if (list.isBroken) throw new Error('busy')
 
-    return { value: [{ id: 'agent_1', description: '🦁 시사 · 로그인 폼 구현', type: 'general-purpose', status: list.status }] }
+    return { value: [{ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: list.status }] }
   })
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('ui.toast', () => ({ value: undefined }))
@@ -662,20 +700,20 @@ test('a list that cannot be read ends nobody, and a guess is overruled by the ta
   await $.agent.spawn(SPAWN)
   await clock.advance(60_000)
 
-  expect((await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text).toContain('🦁 시사 (구현) ● 작업 중')
+  expect((await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text).toContain('🐹 치이카와 (구현) ● 작업 중')
 
   // The list says it is done, which is a guess until the task's own turn says how it went.
   list.isBroken = false
   list.status = 'completed'
   await clock.advance(4000)
 
-  expect((await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text).toContain('🦁 시사 (구현) ✓ 끝')
+  expect((await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text).toContain('🐹 치이카와 (구현) ✓ 끝')
 
   await $.turn.complete({ ...DONE, answer: '', agentId: 'agent_1', reason: 'error' })
 
   const after = (await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text ?? ''
 
-  expect(after).toContain('🦁 시사 (구현) ✗ 실패')
+  expect(after).toContain('🐹 치이카와 (구현) ✗ 실패')
   expect(after).toContain('API 오류')
 })
 
@@ -1085,11 +1123,11 @@ test('two tasks alike that started together are not guessed between: word that o
 
   const after = (await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text ?? ''
 
-  expect(after).toContain('🦁 시사 (구현) ● 작업 중')
-  expect(after).toContain('🦦 랏코 (구현) ✓ 끝')
+  expect(after).toContain('🐹 치이카와 (구현) ● 작업 중')
+  expect(after).toContain('🐰 우사기 (탐색) ✓ 끝')
 
   await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_a', reason: 'answer' })
-  expect((await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text).toContain('🦁 시사 (구현) ✓ 끝')
+  expect((await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text).toContain('🐹 치이카와 (구현) ✓ 끝')
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
@@ -1379,16 +1417,16 @@ test("what the friends were paid outlasts the records of their tasks, until all 
   const usage = async (): Promise<string> => (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
 
   expect(await usage()).toContain('친구별 보수 (토큰, 이번 세션 누적)')
-  expect(await usage()).toContain('🦁 시사: 입력 4.5만 · 캐시 0 · 출력 450')
+  expect(await usage()).toContain('🐹 치이카와: 입력 4.5만 · 캐시 0 · 출력 450')
 
   const cleared = (await $.command.run({ command: 'chiikawa', args: 'clear', ...RUN })).text ?? ''
 
   expect(cleared).toContain('친구별 보수(누적 사용량)는 그대로예요')
-  expect((await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text).toContain('🦁 시사 (구현) ○ 대기')
-  expect(await usage()).toContain('🦁 시사: 입력 4.5만 · 캐시 0 · 출력 450')
+  expect((await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text).toContain('🐹 치이카와 (구현) ○ 대기')
+  expect(await usage()).toContain('🐹 치이카와: 입력 4.5만 · 캐시 0 · 출력 450')
 
   expect((await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })).text).toContain('친구별 보수(누적 사용량)를 지웠어요')
-  expect(await usage()).not.toContain('시사')
+  expect(await usage()).not.toContain('치이카와')
 })
 
 test('a pane short of room draws no wider than its columns and no taller than its rows, whatever is on it', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
@@ -1564,10 +1602,10 @@ test('of two launches in one command, the one handed to an Orca terminal is wait
   const during = await roster($)
 
   expect(during).toContain('🐰 우사기 (탐색) ✓ 끝')
-  expect(during).toContain('🦁 시사 (구현) ● 작업 중')
+  expect(during).toContain('🐹 치이카와 (구현) ● 작업 중')
   put('/w/a/other.out.md.meta.json', PASSED)
   await clock.advance(4000)
-  expect(await roster($)).toContain('🦁 시사 (구현) ✓ 끝')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ✓ 끝')
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
@@ -1590,7 +1628,7 @@ test('a launch whose paths an inner shell fills in is a task with its command le
 
   // Handed on, there is no result file to wait for: it waits, and says the path could not be read.
   await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_bg', command: `export X=${SPEC}; nohup bash -c 'fleet-run codex-build --cwd /w --spec "$X" --out "$X.out"' &` })
-  expect(await roster($)).toContain('🦁 시사 (구현) ◐ 기다리는 중')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ◐ 기다리는 중')
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
@@ -1607,11 +1645,11 @@ test('a result file one worker is waited for at does not end a second worker tol
   const during = await roster($)
 
   expect(during).toContain('🐰 우사기 (탐색) ● 작업 중')
-  expect(during).toContain('🦁 시사 (구현) ◐ 기다리는 중')
+  expect(during).toContain('🐹 치이카와 (구현) ◐ 기다리는 중')
 
   const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: { ...PANE, bodyColumns: 100 } })
 
-  await pane.press({ key: 'watch-shisa' })
+  await pane.press({ key: 'watch-chiikawa' })
   expect(await pane.find({ type: 'Text', text: /다른 작업이 같은 결과 파일을 쓰고 있어서/ })).toBeDefined()
   await pane.press({ key: 'watch-close' })
   await pane.unmount()
@@ -1625,13 +1663,13 @@ test('a result file one worker is waited for at does not end a second worker tol
   const usage = (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
 
   expect(after).toContain('🐰 우사기 (탐색) ✓ 끝')
-  expect(after).toContain('🦁 시사 (구현) ◐ 기다리는 중')
+  expect(after).toContain('🐹 치이카와 (구현) ◐ 기다리는 중')
   expect(usage).toContain(`🐰 우사기: ${spent('ko', { fresh: 1000, cached: 0, out: 10 })}`)
-  expect(usage).not.toContain('시사')
+  expect(usage).not.toContain('치이카와')
 
   // With no result of its own to learn its end from, the second is let go as one that named none.
   await clock.advance(3_610_000)
-  expect(await roster($)).toContain('시사의 other · 결과가 없어 내려놓음')
+  expect(await roster($)).toContain('치이카와의 other · 결과가 없어 내려놓음')
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
@@ -1801,14 +1839,14 @@ test('every end that comes before its task is told its id is kept in order, and 
 
   const usage = (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
 
-  expect(await roster($)).toContain('🦦 랏코 (구현) ✓ 끝')
-  expect(usage).toContain(`🦦 랏코: ${spent('ko', { fresh: 3000, cached: 0, out: 30 })}`)
-  expect(usage).not.toContain('시사')
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  expect(usage).toContain(`🐰 우사기: ${spent('ko', { fresh: 3000, cached: 0, out: 30 })}`)
+  expect(usage).not.toContain('치이카와')
 
   // What it handed back is what its last turn said.
   const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE })
 
-  await pane.press({ key: 'watch-rakko' })
+  await pane.press({ key: 'watch-usagi' })
   expect(await pane.find({ type: 'Text', text: /^나머지도 고쳤습니다\.$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^절반을 고쳤습니다\.$/ })).toBeUndefined()
   await pane.press({ key: 'watch-close' })
@@ -1833,19 +1871,19 @@ test('an agent whose row tells of other work is not taken for the one task that 
 
   const during = await roster($)
 
-  expect(during).toContain('🦁 시사 (구현) ● 작업 중')
+  expect(during).toContain('🐹 치이카와 (구현) ● 작업 중')
   expect(during).not.toContain('✓ 끝')
-  expect((await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text).not.toContain('시사')
+  expect((await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text).not.toContain('치이카와')
 
   // An hour on it is still waited for; past two, with no agent ever told to be its, it is let go and said to be.
   await clock.advance(3_600_000)
-  expect(await roster($)).toContain('🦁 시사 (구현) ● 작업 중')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ● 작업 중')
   await clock.advance(3_610_000)
 
   const gone = await roster($)
 
-  expect(gone).toContain('🦁 시사 (구현) ○ 대기')
-  expect(gone).toContain('(시사의 로그인 폼 구현 · 끝을 알 수 없어 내려놓음)')
+  expect(gone).toContain('🐹 치이카와 (구현) ○ 대기')
+  expect(gone).toContain('(치이카와의 로그인 폼 구현 · 끝을 알 수 없어 내려놓음)')
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
@@ -1874,15 +1912,15 @@ test('turned off, the mode still ends the tasks it had taken, with what they han
   const after = await roster($)
   const usage = (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
 
-  expect(after).toContain('🦁 시사 (구현) ✓ 끝')
-  expect(usage).toContain(`🦁 시사: ${spent('ko', { fresh: 1000, cached: 0, out: 10 })}`)
+  expect(after).toContain('🐹 치이카와 (구현) ✓ 끝')
+  expect(usage).toContain(`🐹 치이카와: ${spent('ko', { fresh: 1000, cached: 0, out: 10 })}`)
   expect(usage.match(/입력/g)).toHaveLength(1)
   // No line of the conversation was added while it was off.
   expect(after.split('\n').filter(line => line.includes('“')).length).toBe(before.split('\n').filter(line => line.includes('“')).length)
 
   const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE })
 
-  await pane.press({ key: 'watch-shisa' })
+  await pane.press({ key: 'watch-chiikawa' })
   expect(await pane.find({ type: 'Text', text: /^로그인 폼을 고쳤습니다\.$/ })).toBeDefined()
   await pane.press({ key: 'watch-close' })
   await pane.unmount()
@@ -1894,7 +1932,7 @@ test("what a task really cost is still its character's when word of it comes aft
 
   session(on)
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
-  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '🦁 시사 · 로그인 폼 구현', type: 'general-purpose', status: 'completed' as const }] }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'completed' as const }] }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
 
   const usage = async (): Promise<string> => (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
@@ -1903,14 +1941,14 @@ test("what a task really cost is still its character's when word of it comes aft
   await $.agent.spawn(SPAWN)
   // The list says it is done, which is a guess; the person clears the page before the task's own turn says what it cost.
   await clock.advance(4000)
-  expect(await roster($)).toContain('🦁 시사 (구현) ✓ 끝')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ✓ 끝')
   await $.command.run({ command: 'chiikawa', args: 'clear', ...RUN })
-  expect(await usage()).not.toContain('시사')
+  expect(await usage()).not.toContain('치이카와')
 
   await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer', usage: USED })
-  expect(await usage()).toContain(`🦁 시사: ${spent('ko', { fresh: 1000, cached: 0, out: 10 })}`)
+  expect(await usage()).toContain(`🐹 치이카와: ${spent('ko', { fresh: 1000, cached: 0, out: 10 })}`)
   // The record is not brought back by it.
-  expect(await roster($)).toContain('🦁 시사 (구현) ○ 대기')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ○ 대기')
 
   // Cleared with the accounts, nothing is listened for any more.
   await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2' })
@@ -1918,7 +1956,7 @@ test("what a task really cost is still its character's when word of it comes aft
   await $.command.run({ command: 'chiikawa', args: 'clear', ...RUN })
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
   await $.turn.complete({ ...DONE, turnId: 'turn_2', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer', usage: USED })
-  expect(await usage()).not.toContain('시사')
+  expect(await usage()).not.toContain('치이카와')
 })
 
 test('a pane short of room still names or counts everyone with no card, draws an empty conversation in its rows, and keeps what a sheet has to press', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
@@ -2089,14 +2127,14 @@ test("an agent whose row only ends as a waiting task's title does is not that ta
 
   const during = await roster($)
 
-  expect(during).toContain('🦁 시사 (구현) ● 작업 중')
+  expect(during).toContain('🐹 치이카와 (구현) ● 작업 중')
   expect(during).not.toContain('✓ 끝')
-  expect((await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text).not.toContain('시사')
+  expect((await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text).not.toContain('치이카와')
 
   // Its own row, under the name the spawn hook gave it, ends it.
-  rows.push({ id: 'agent_1', description: '🦁 시사 · 로그인 폼 구현', type: 'general-purpose', status: 'completed' as const })
+  rows.push({ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'completed' as const })
   await clock.advance(8000)
-  expect(await roster($)).toContain('🦁 시사 (구현) ✓ 끝')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ✓ 끝')
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
@@ -2127,7 +2165,7 @@ test('of two workers taken at the same moment and told to write one result file,
 
   const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: { ...PANE, bodyColumns: 100 } })
 
-  await pane.press({ key: 'watch-shisa' })
+  await pane.press({ key: 'watch-chiikawa' })
   expect(await pane.find({ type: 'Text', text: /다른 작업이 같은 결과 파일을 쓰고 있어서/ })).toBeDefined()
   await pane.press({ key: 'watch-close' })
   await pane.unmount()
@@ -2150,4 +2188,79 @@ test('a spec copy that does not read back as it was written is not used: the lau
   expect(answer.context?.join('\n')).toContain('작업은 우사기(탐색)가 맡았다.')
   expect(answer.context?.join('\n')).not.toContain('사본')
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a shell command sent to the background is a task of a character, ended by the word the engine sends of its end', KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('tool.call', ($, e) => {
+    if (e.tool !== 'Bash') return { result: { stdout: '', stderr: '' } }
+
+    const background = e.command.includes('test') ? 'bt1' : e.command.includes('build') ? 'bt2' : undefined
+
+    return { result: { stdout: '', stderr: '', ...(background === undefined ? {} : { backgroundTaskId: background }) } } as never
+  })
+
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: '테스트 돌리기', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'npm run build', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+
+  const working = await roster($)
+
+  expect(working).toContain('테스트 돌리기')
+  expect(working).toContain('npm run build')
+  expect(working).not.toContain('· ls')
+
+  const notice = (id: string, status: string, code: number): string =>
+    `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>Background command finished (exit code ${code})</summary>\n</task-notification>`
+
+  await $.prompt.submit({ text: notice('bt1', 'completed', 0), wait: false, origin: { kind: 'task-notification' } })
+  await $.prompt.submit({ text: notice('bt2', 'completed', 1), wait: false, origin: { kind: 'task-notification' } })
+
+  const ended = await roster($)
+
+  expect(ended).toContain('✓ 끝')
+  expect(ended).toContain('✗ 실패')
+})
+
+test('a background command done leaves no mark by its friend in the desktop band, then or later', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.invalidate', () => ({ value: undefined }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('tool.call', ($, e) => {
+    if (e.tool !== 'Bash') return { result: { stdout: '', stderr: '' } } as never
+
+    return { result: { stdout: '', stderr: '', ...(e.run_in_background === true ? { backgroundTaskId: 'bs1' } : {}) } } as never
+  })
+
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'screencapture -x a.png', description: '화면 찍기', run_in_background: true })
+  await clock.advance(4000)
+  await $.prompt.submit({ text: '<task-notification>\n<task-id>bs1</task-id>\n<status>completed</status>\n<summary>Background command "화면 찍기" completed (exit code 0)</summary>\n</task-notification>', wait: false, origin: { kind: 'task-notification' } })
+  const fresh = await $.ui.mount({ plugin: 'chiikawa', surface: 'desktop', component: 'AbovePrompt', props: { ...BAND, isCollapsed: false } })
+
+  // A task done leaves no mark by its friend on the desktop.
+  expect((await fresh.findAll({ type: 'Text', text: '✓' })).length).toBe(0)
+  await fresh.unmount()
+  for (let i = 0; i < 20; i++) {
+    await $.tool.call({ tool: 'Read', file_path: `/w/f${i}.png` })
+    await clock.advance(3000)
+  }
+  const band = await $.ui.mount({ plugin: 'chiikawa', surface: 'desktop', component: 'AbovePrompt', props: { ...BAND, isCollapsed: false } })
+  const chip = await band.find({ key: 'chip-chiikawa' })
+  const marks = chip === undefined ? [] : (await band.findAll({ type: 'Text', text: '✓' }))
+
+  expect(chip).toBeDefined()
+  expect(marks.length).toBe(0)
+  await band.unmount()
 })

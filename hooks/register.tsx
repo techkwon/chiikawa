@@ -1,12 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, Elements, EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Aids, Lang, MemberId, Phrase, Role, Roles, Said, Task, Tokens, Usage, WorkRole } from '../types'
+import type { Aid, Aids, Lang, MemberId, Phrase, Role, Roles, Said, Task, Tokens, Usage, WorkRole } from '../types'
 
 import type { Situation } from './cast'
 import { CAST, isActive, jobOf, LEAD, MEMBERS, MOODS, pickMember, PROFILES, readingOf, reported, roleOf, roleOfAgent, rolesFrom, say, shown, specialistOf, titleOf, toneOf, withRole, WORK_ROLES, WORKERS } from './cast'
 import type { FleetRun } from './orca'
 import { findFleetRuns, readMeta, voicedSpecPath } from './orca'
+import { clearLook, keepLook, lookKept, SCENES, sceneAsked, setLook, unpainted } from './look'
+import type { LookKept } from './look'
+import { artSource, drawDeskBand, drawDeskPane, drawDeskTurn } from './desk'
+import { bandPictureOf, loadPictures, type PicturesRead, usePictures } from './pictures'
 import type { Kit, Scene } from './view'
 import { AID_MS, drawBand, drawPane, lastSaid, plus, rosterLines, talkLines, usageLines, ZERO } from './view'
 import { castIn, firstLines, fleetNote, isMarked, leaderSection, memberBlock, memberNamed, namedMember, openerOf, orcaBlock, pickNote, roleNamed, roleNote, standDown, tookNote, unvoiced } from './voice'
@@ -54,9 +58,16 @@ const brief = atom({ plugin: 'chiikawa', key: 'brief' } as const, { isAlive: fal
 const isPaneDismissed = atom({ plugin: 'chiikawa', key: 'isPaneDismissed' } as const, false)
 const feed = atom({ plugin: 'chiikawa', key: 'feed' } as const, [])
 const picked = atom({ plugin: 'chiikawa', key: 'picked' } as const, null)
+/** Whether the band lists the friends to send the next prompt to. */
+const isPicking = atom({ plugin: 'chiikawa', key: 'isPicking' } as const, false)
+const isDemoHeld = atom({ plugin: 'chiikawa', key: 'isDemoHeld' } as const, false)
+
+/** A demonstration's task: the mode makes these itself, named by this id. */
+const isDemoTask = (task: Pick<Task, 'id'>): boolean => task.id.startsWith('orca:demo:')
 const watched = atom({ plugin: 'chiikawa', key: 'watched' } as const, null)
 const isLight = atom({ plugin: 'chiikawa', key: 'isLight' } as const, false)
 const frame = atom({ plugin: 'chiikawa', key: 'frame' } as const, 0)
+const pictures = atom({ plugin: 'chiikawa', key: 'pictures' } as const, {})
 const aids = atom({ plugin: 'chiikawa', key: 'aids' } as const, {})
 const isUsageOpen = atom({ plugin: 'chiikawa', key: 'isUsageOpen' } as const, true)
 const talkBack = atom({ plugin: 'chiikawa', key: 'talkBack' } as const, 0)
@@ -120,6 +131,15 @@ const tasksOf = async ($: Engine): Promise<Task[]> =>
 /** The hands lent, each with its words in each language. */
 const aidsOf = async ($: Engine): Promise<Aids> =>
   Object.fromEntries(Object.entries(await read($, aids)).map(([id, aid]) => [id, { ...aid, what: phraseOf(aid.what), ...(aid.brief === undefined ? {} : { brief: phraseOf(aid.brief) }) }]))
+
+/** Reads the person's picture folder and keeps what it holds in the session's state, which redraws every drawing that shows them. */
+const keepPictures = async ($: Engine): Promise<PicturesRead> => {
+  const found = await loadPictures($).catch((): PicturesRead => ({ folder: '', found: [], files: 0, small: 0, skipped: [], table: {} }))
+
+  await update($, pictures, () => found.table).catch(() => undefined)
+
+  return found
+}
 
 const sceneOf = async ($: Engine): Promise<Scene> => ({
   lang: await langOf($),
@@ -399,6 +419,9 @@ const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise
  * file, 우사기 or 치이카와 is seen lending a hand, saying so now and then
  * for 하치와레 to read aloud. One with a task of its own is left to it.
  */
+/** When a stretch of lent hands began: kept while the hands are lent again within AID_MS, else now. */
+const sinceOf = (was: Aid | undefined, now: number): number => (was !== undefined && now - was.at < AID_MS ? (was.since ?? was.at) : now)
+
 const lend = ($: Engine, tool: string, detail: string): Promise<void> =>
   inTurn(async () => {
     const now = await $.clock.now()
@@ -414,15 +437,15 @@ const lend = ($: Engine, tool: string, detail: string): Promise<void> =>
         ...was,
         [LEAD]:
           helper === undefined
-            ? { what: asIs(`${tool}${target}`), at: now, saidAt: now }
-            : { what: inAll(lang => `${WORDS[lang].lending(CAST[lang].names[helper], verb(lang))}${target}`), brief: inAll(lang => WORDS[lang].withFriend(CAST[lang].names[helper])), at: now, saidAt: now },
+            ? { what: asIs(`${tool}${target}`), at: now, saidAt: now, since: sinceOf(was[LEAD], now) }
+            : { what: inAll(lang => `${WORDS[lang].lending(CAST[lang].names[helper], verb(lang))}${target}`), brief: inAll(lang => WORDS[lang].withFriend(CAST[lang].names[helper])), at: now, saidAt: now, since: sinceOf(was[LEAD], now) },
       }
 
       if (helper !== undefined) {
         const last = was[helper]?.saidAt
 
         box.isDue = last === undefined || now - last >= AID_SAY_MS
-        next[helper] = { what: doing, at: now, saidAt: box.isDue || last === undefined ? now : last }
+        next[helper] = { what: doing, at: now, saidAt: box.isDue || last === undefined ? now : last, since: sinceOf(was[helper], now) }
       }
 
       return next
@@ -787,7 +810,8 @@ const checkWorker = async ($: Engine, task: Task, now: number): Promise<void> =>
     // A demonstration's title opens with the word for one, in every language.
     const report = inAll(lang => WORDS[lang].demoReport(titleOf(lang, task).replace(/^[^:]+: /, '')))
 
-    if (now >= at) await settle($, task.id, { isOk, why: words => words.demo, ...(isOk ? { report } : {}) })
+    // One turned on to stay is held at work until it is turned off.
+    if (now >= at && !(isDemoTask(task) && (await read($, isDemoHeld)))) await settle($, task.id, { isOk, why: words => words.demo, ...(isOk ? { report } : {}) })
 
     return
   }
@@ -915,7 +939,7 @@ const tick = async ($: Engine): Promise<void> => {
 
     for (const task of active) {
       if (task.kind === 'orca') await checkWorker($, task, now)
-      else if (agents !== undefined) await checkAgent($, task, agents, now)
+      else if (task.kind === 'agent' && agents !== undefined) await checkAgent($, task, agents, now)
       // A subagent's task no agent was told to be whose after two hours has an end that cannot be learned, as a worker's with no result: it is let go.
       if (isUnnamed(task) && now - task.startedAt > LOST_MS * 2) await letGo($, task.id, now, words => words.lost)
     }
@@ -937,6 +961,15 @@ const openPane = async ($: Engine): Promise<void> => {
   await $.ui.open({ id: PANE, title: WORDS[await langOf($)].brand, closeOnEscape: true, ...PANE_SIZE })
   await update($, isPaneOpen, () => true)
   await update($, isPaneDismissed, () => false)
+}
+
+/** The band's open button: opens the pane, or closes it when it is open (closed by hand, so it is not opened again by itself). */
+const togglePane = async ($: Engine): Promise<void> => {
+  if (!(await read($, isPaneOpen))) return openPane($)
+  await update($, isPaneDismissed, () => true)
+  await $.ui.close({ id: PANE })
+  await update($, isPaneOpen, () => false)
+  await update($, watched, () => null)
 }
 
 /**
@@ -1074,6 +1107,15 @@ const pick = async ($: Engine, id: MemberId): Promise<MemberId | null> => {
   $.ui.toast(box.now === null ? WORDS[spoke].unpicked(whoOf(spoke, id)) : WORDS[spoke].pickedToast(MEMBERS[id].mark, CAST[spoke].names[id]))
 
   return box.now
+}
+
+/** A friend, or auto, was chosen from the band's list: it takes the next prompt, and the list closes. */
+const choose = async ($: Engine, id: MemberId | null): Promise<void> => {
+  await update($, picked, () => id)
+  await update($, isPicking, () => false)
+  const spoke = await langOf($)
+
+  $.ui.toast(id === null ? WORDS[spoke].autoHow : WORDS[spoke].pickedToast(MEMBERS[id].mark, CAST[spoke].names[id]))
 }
 
 /** Who takes the next prompt was pressed: a chosen friend is let go, and the person is told how the choosing goes. */
@@ -1223,6 +1265,44 @@ const reload = ($: Engine): Promise<void> =>
   }))
 
 /** Has this session hold what is kept over sessions: a `/clear` starts one with none of it, and no `session.start` fires for it. */
+/** A command's kind of work, by what it runs: tests and checks are looked over, searches find, the rest is built. */
+const SHELL_CHECKS = /\b(?:test|tests|pytest|jest|vitest|tsc|lint|eslint|validate|check)\b/i
+const SHELL_LOOKS = /^\s*(?:grep|rg|find|ls|cat|curl|wget|git\s+(?:log|status|diff|show))\b/i
+const shellRole = (command: string): Role => (SHELL_CHECKS.test(command) ? '검토' : SHELL_LOOKS.test(command) ? '탐색' : '구현')
+
+/**
+ * A command the main loop left running in the background, by its own choice
+ * or moved there while it ran, is a task like a subagent's: a character takes
+ * it, and its notification ends it.
+ */
+const watchShell = async ($: Engine, call: string, background: string, command: string, description: string | undefined): Promise<void> => {
+  const title = description?.trim() || (command.split('\n')[0] ?? '').trim().slice(0, 60)
+
+  await reserve($, { id: `shell:${background}`, kind: 'shell', role: shellRole(command), engine: 'Bash', title, call })
+}
+
+/** What a background task's notification says: its id, how it ended, and its one-line summary. */
+const NOTICE = /<task-notification>([\s\S]*?)<\/task-notification>/g
+const field = (block: string, name: string): string | undefined => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(block)?.[1]?.trim()
+
+/** Ends the background commands a notification tells of: a nonzero exit, a failure or a stop is a failure. */
+const endShells = async ($: Engine, text: string): Promise<void> => {
+  const active = (await read($, tasks)).filter(task => task.kind === 'shell' && isActive(task))
+
+  if (active.length === 0) return
+  for (const [, block = ''] of text.matchAll(NOTICE)) {
+    const id = field(block, 'task-id')
+    const task = active.find(one => one.id === `shell:${id ?? ''}`)
+
+    if (task === undefined) continue
+    const status = field(block, 'status') ?? ''
+    const summary = field(block, 'summary') ?? ''
+    const code = /exit code (\d+)/i.exec(summary)?.[1]
+
+    await settle($, task.id, { isOk: status === 'completed' && (code === undefined || code === '0'), ...(summary === '' ? {} : { summary: [summary.slice(0, 200)] }) })
+  }
+}
+
 const ensure = async ($: Engine): Promise<void> => {
   if (!(await read($, isLoaded))) await reload($)
 }
@@ -1233,11 +1313,22 @@ const ensure = async ($: Engine): Promise<void> => {
  * not read it in, and a press that went ahead without it would save over
  * what is kept. A press that fails does no more.
  */
+/** The words `/chiikawa look` takes, in the three languages, for each choice. */
+const LOOK_WORDS: Record<string, LookKept> = {
+  on: 'auto', auto: 'auto', 켜기: 'auto', 자동: 'auto', オン: 'auto', 自動: 'auto',
+  day: 'day', light: 'day', 낮: 'day', 昼: 'day', ひる: 'day',
+  night: 'night', dark: 'night', 밤: 'night', 夜: 'night', よる: 'night',
+  off: 'off', 끄기: 'off', オフ: 'off',
+}
+
 const pressed = ($: Engine, act: () => Promise<unknown>): void =>
   void ensure($)
     .catch(() => undefined)
     .then(act)
     .catch(() => undefined)
+
+/** How large a friend's picture is drawn before the desktop's progress line, in points. */
+const SPIN_SIDE = 24
 
 export const register: Register = (on, options) => {
   const isLeaderVoiced = options.leaderVoice !== false
@@ -1252,9 +1343,21 @@ export const register: Register = (on, options) => {
   langWanted = options.language === 'en' || options.language === 'ko' || options.language === 'ja' ? options.language : 'auto'
 
   isAutoOpening = options.autoOpen !== false
+  const isLookWanted = options.desktopLook !== false
 
   on('session.start', async ($, e, next) => {
     await reload($)
+    // The person's own pictures for the desktop cards, if any; a friend with none keeps its emoji. They are kept in the session's state, which every drawing reads (the band may be drawn where this copy of the module is not).
+    await keepPictures($)
+    // The desktop look is set once here: neither a reload nor --resume keeps a theme. Never cleared here, so another mod's theme is left alone when the look is off.
+    if (isLookWanted) {
+      const kept = await lookKept($)
+
+      if (kept !== 'off') {
+        if (unpainted !== undefined) $.ui.toast(unpainted)
+        await setLook($, kept).catch(() => undefined)
+      }
+    }
     timer?.cancel()
     timer = $.clock.every(TICK_MS, () => void tick($).catch(() => undefined))
     mover?.cancel()
@@ -1281,6 +1384,7 @@ export const register: Register = (on, options) => {
     if (asked === 'on' || asked === 'off') {
       await update($, isOn, () => asked === 'on')
       if (asked === 'off') {
+        await update($, isDemoHeld, () => false)
         await update($, picked, () => null)
         await update($, watched, () => null)
         await update($, talkBack, () => 0)
@@ -1320,21 +1424,59 @@ export const register: Register = (on, options) => {
 
       return { text: isAll ? said.clearedAll : said.cleared }
     }
-    if (asked === 'demo') {
+    if (asked === 'demo off') {
+      const held = (await read($, tasks)).filter(task => isDemoTask(task) && isActive(task))
+      const wasHeld = await read($, isDemoHeld)
+
+      await update($, isDemoHeld, () => false)
+      if (!wasHeld && held.length === 0) return { text: said.demoNone }
+      // Each ends now, as it would have when due.
+      for (const task of held) await checkWorker($, task, Number.MAX_SAFE_INTEGER)
+
+      return { text: said.demoStopped }
+    }
+    if (asked === 'demo' || asked === 'demo on') {
       // The beat ends a demonstration's tasks, and the beat rests while the mode is off.
       if (!(await read($, isOn))) return { text: said.demoOff }
       const now = await $.clock.now()
+
+      await update($, isDemoHeld, () => asked === 'demo on')
 
       for (const [index, [role, member, ms, isOk]] of DEMO.entries()) {
         // The mode names these itself: each has its title in every language, and the screen its own word for what runs it.
         await reserve($, { id: `orca:demo:${index}`, kind: 'orca', role, engine: said.demo, title: said.demoTitles[index] ?? said.demo, titles: inAll(lang => WORDS[lang].demoTitles[index] ?? WORDS[lang].demo), due: { at: now + ms, isOk } }, member)
       }
 
-      return { text: said.demoStarted }
+      return { text: asked === 'demo on' ? said.demoHeld : said.demoStarted }
     }
 
     const [verb = '', ...words] = asked.split(/\s+/)
 
+    if (verb === 'look' || verb === '배경' || verb === '背景') {
+      const how = LOOK_WORDS[words[0] ?? '']
+
+      if (how === 'off') {
+        await keepLook($, 'off')
+        await clearLook($).catch(() => undefined)
+
+        return { text: said.lookOff }
+      }
+      if (how !== undefined) {
+        await keepLook($, how)
+        const set = await setLook($, how).catch((error: unknown) => ({ isDrawn: false, reason: String(error) }))
+
+        if (!set.isDrawn) return { text: said.lookUndrawn(set.reason ?? '') }
+
+        return { text: how === 'day' ? said.lookDay : how === 'night' ? said.lookNight : said.lookOn }
+      }
+
+      return { text: said.lookHelp(isLookWanted ? await lookKept($) : 'off') }
+    }
+    if (verb === 'pictures' || verb === 'picture' || verb === '그림' || verb === '絵') {
+      const found = await keepPictures($)
+
+      return { text: said.pictures(found.folder, found.found.map(id => CAST[spoke].names[id]), found.files, found.small, found.skipped) }
+    }
     if (verb === 'role' || verb === 'roles' || verb === '역할' || verb === '役割') return { text: await runRole($, words) }
     if (verb === 'lang' || verb === 'language' || verb === '언어' || verb === '言語') return { text: await runLang($, words) }
     if (asked === 'talk' || asked === 'story' || asked === '이야기' || asked === 'はなし' || asked === '話') {
@@ -1400,6 +1542,8 @@ export const register: Register = (on, options) => {
   // The character chosen in the band goes beside the same prompt, and the
   // choice is spent with it; a slash command is not a prompt to hand on.
   on('prompt.submit', async ($, e, next) => {
+    // A background command's notification ends the task its character took.
+    if (e.origin.kind === 'task-notification') await endShells($, e.text).catch(() => undefined)
     if (!TYPED.has(e.origin.kind)) return next(e)
     await ensure($).catch(() => undefined)
     const was = await langOf($)
@@ -1499,8 +1643,17 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && e.tool !== 'Agent' && !isFleet) {
       // The main loop's own work: the three are seen at it together.
       if (isTrioShown && (await read($, isOn).catch(() => false))) await lend($, e.tool, detailOf(e)).catch(() => undefined)
+      if (e.tool !== 'Bash') return next(e)
+      const ran = await next(e)
+      // Left running in the background, asked for or moved there: a character watches it to its end.
+      const background = ran.deny === undefined && ran.isError !== true ? (ran.result as { backgroundTaskId?: string } | undefined)?.backgroundTaskId : undefined
 
-      return next(e)
+      if (background !== undefined && (await read($, isOn).catch(() => false))) {
+        await ensure($).catch(() => undefined)
+        await watchShell($, e.tool_use_id, background, e.command, e.description).catch(() => undefined)
+      }
+
+      return ran
     }
     if (!(await read($, isOn))) return next(e)
     if (e.agentId !== undefined) await touch($, e.agentId, e.tool, detailOf(e)).catch(() => undefined)
@@ -1613,20 +1766,57 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  on('ui.render', { component: 'Backdrop' }, async ($, e, next) => {
+    // Every mod's backdrop comes here: draw only this mod's meadow, on the apps that draw one.
+    const asked = sceneAsked(e.props)
+    const scene = asked.scene === undefined ? undefined : SCENES[asked.scene]
+
+    if (asked.plugin !== $.plugin.name || scene === undefined) return next(e)
+    if (e.surface !== 'desktop' && e.surface !== 'mobile') return next(e)
+    const { Svg } = $.ui.resolve(e)
+
+    // The drawn meadow, for an engine that takes no painting as the ground.
+    return <Svg source={scene} alt="A pastel meadow: clouds drift, grass and flowers sway, and stars twinkle at night" isInteractive />
+  })
+
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     if (!(await read($, isOn))) return next(e)
     const task = (await read($, tasks)).find(one => one.id === e.requestId && isActive(one))
     const spoke = await langOf($)
     const { spinner, doing } = WORDS[spoke]
-    const word =
-      task === undefined
-        ? `${MEMBERS[LEAD].mark} ${spinner[e.props.mode] ?? spinner.thinking ?? ''}`
-        : `${MEMBERS[task.member].mark} ${doing(CAST[spoke].names[task.member], CAST[spoke].job[task.role])}`
+    const who = task === undefined ? LEAD : task.member
+    const said = task === undefined ? (spinner[e.props.mode] ?? spinner.thinking ?? '') : doing(CAST[spoke].names[task.member], CAST[spoke].job[task.role])
 
-    return next({ ...e, props: { ...e.props, word } })
+    // On the desktop the friend's own small picture stands before the line, where the person gave one. The desktop
+    // draws the picture while the turn thinks, answers or writes a step; while a step runs it draws its own line instead.
+    if (e.surface === 'desktop') {
+      usePictures(await read($, pictures))
+      const face = bandPictureOf(who, 'working')
+
+      if (face !== undefined) {
+        const { Box, Svg, Text } = $.ui.resolve(e)
+
+        return (
+          <Box gap="xs" alignItems="center">
+            <Svg source={artSource(face, SPIN_SIDE)} alt={CAST[spoke].names[who]} width={SPIN_SIDE} height={SPIN_SIDE} />
+            <Text>{said}</Text>
+          </Box>
+        )
+      }
+    }
+
+    // Elsewhere, or with no picture, the line takes words alone, its emoji before them.
+    return next({ ...e, props: { ...e.props, word: `${MEMBERS[who].mark} ${said}` } })
   })
 
   on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
+    if (e.surface === 'desktop') {
+      if (!(await read($, isOn))) return next(e)
+      usePictures(await read($, pictures))
+      const { Box, Text, Button, Svg } = $.ui.resolve(e)
+
+      return drawDeskTurn({ Box, Text, Button, Svg, isAnimated }, await langOf($), e.props.durationMs)
+    }
     if (e.surface !== 'terminal' || !(await read($, isOn))) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const isLong = e.props.durationMs >= 600_000
@@ -1647,6 +1837,24 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (isBandShown && e.surface === 'desktop' && !e.props.hasSurvey && (await read($, isOn))) {
+      usePictures(await read($, pictures))
+      const scene = await sceneOf($)
+      const { Box, Text, Button, Svg } = $.ui.resolve(e)
+
+      return drawDeskBand({ Box, Text, Button, Svg, isAnimated }, scene, {
+        isLive: isLive(scene) && !(await read($, isPaneOpen)),
+        rows: e.props.maxRows,
+        isCollapsed: e.props.isCollapsed === true,
+        isPicking: await read($, isPicking),
+        onSeat: id => pressed($, () => watch($, id)),
+        onOpen: () => pressed($, () => togglePane($)),
+        onUsage: () => pressed($, () => update($, isUsageOpen, () => true).then(() => openPane($))),
+        onAuto: () => pressed($, () => update($, isPicking, was => !was)),
+        onChoose: id => pressed($, () => choose($, id)),
+        isPaneOpen: await read($, isPaneOpen),
+      })
+    }
     if (!isBandShown || e.surface !== 'terminal' || e.props.hasSurvey || !(await read($, isOn))) return next(e)
     const scene = await sceneOf($)
 
@@ -1663,6 +1871,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    if (e.surface === 'desktop') usePictures(await read($, pictures))
     const scene = await sceneOf($)
     const isShown = await read($, isOn)
 
@@ -1670,6 +1879,19 @@ export const register: Register = (on, options) => {
       const room = { columns: e.props.bodyColumns, rows: e.props.scroll.bodyRows }
 
       return drawPane(await kitOf($, $.ui.resolve(e)), scene, isShown, room, {
+        onWatch: id => pressed($, () => watch($, id)),
+        onPick: id => pressed($, () => pick($, id)),
+        onUsage: () => pressed($, () => update($, isUsageOpen, was => !was)),
+        onTalk: back => pressed($, () => update($, talkBack, () => back)),
+        onStory: () => pressed($, () => update($, isTalkOnly, was => !was)),
+        onRole: (id, role) => pressed($, () => press($, id, role)),
+      })
+    }
+    if (e.surface === 'desktop') {
+      const { Box, Text, Button, Svg } = $.ui.resolve(e)
+      const seat = e.props.placement === 'widget' || e.props.placement === 'inline' ? e.props.placement : 'dock'
+
+      return drawDeskPane({ Box, Text, Button, Svg, isAnimated }, scene, isShown, e.props.bodyColumns, seat, {
         onWatch: id => pressed($, () => watch($, id)),
         onPick: id => pressed($, () => pick($, id)),
         onUsage: () => pressed($, () => update($, isUsageOpen, was => !was)),

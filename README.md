@@ -234,6 +234,7 @@ Press `Talk only` at the end of the talk row, or type `/chiikawa talk`, and the 
 - **Lines for the moment**: they appear in the talk when the moment comes. When new work is posted, Roudou no Yoroi-san says “First come, first served!”; when two friends come to work at once, “It's a friendly type…!!”; when a task passes three minutes, its friend says a line and Momonga, if free, says “I'm so hungry I feel kinda sick—!!!”; when a friend's tool call is denied, Roudou no Yoroi-san says “A mimic type, huh~?”; when Chiikawa's task fails, Hachiware says “They cried!!!”; and when several tasks end well together, “Easy!! Easy!!!”.
 - **Movement**: the text drawing of a friend at work walks and its icon bounces. While nobody is at work, the drawings do not move.
 - **Light and dark screens**: if the name of the Claude Code theme has `light` in it, the mod draws in deeper colors that read on a light background. A change of theme is followed when you next send a prompt or run `/chiikawa`. If the colors do not suit, fix "Color theme" in the settings to `light` or `dark`.
+- **The desktop meadow and colors**: in local sessions in the desktop app's Code tab, the mod paints the app in soft pink (light mode) or a navy night sky (dark mode) and draws a moving meadow behind the conversation: clouds drift, grass and flowers sway and fluff floats up by day, and stars twinkle under a crescent moon in dark mode. The drawing is the mod's own, made of plain shapes, with no character from the comic in it. The terminal and editors keep their look. `/chiikawa look off` takes it off and `/chiikawa look on` puts it back. With another theme mod, only the one set last shows.
 
 ## Commands
 
@@ -252,6 +253,9 @@ Press `Talk only` at the end of the talk row, or type `/chiikawa talk`, and the 
 | `/chiikawa lang` | Shows the language in use and what settled it |
 | `/chiikawa lang en` (`ko` · `ja`) | Chooses the language. It stays for later sessions (if it could not be saved, the reply says it holds for this session only) |
 | `/chiikawa lang auto` | Clears both the language you chose and the one remembered from the letters you typed, and lets the language be settled automatically |
+| `/chiikawa look` | Shows whether the desktop meadow and colors are on |
+| `/chiikawa look day` · `/chiikawa look night` | Keeps the window in day (pink meadow, light window) or night (starry sky, dark window) whatever the app's mode. `look on` follows the app's light or dark mode |
+| `/chiikawa look on` · `/chiikawa look off` | Turns the desktop app's meadow and colors on or off, kept for later sessions. `off` clears the theme that stands, so a theme another mod set goes too |
 | `/chiikawa clear` | Clears the finished tasks and the talk. Tasks still running and each friend's pay (the usage so far) are kept |
 | `/chiikawa clear all` | Clears every task, even those still listed as running, along with the talk and each friend's pay (the usage so far) |
 
@@ -273,6 +277,7 @@ You set these on the screen that asks as you install, and change them later by t
 | `trio` | The three together | on | Shows light work the main session does itself as Hachiware, Chiikawa and Usagi at it together (Usagi for tools that search, Chiikawa for tools that edit) |
 | `animate` | Movement while working | on | The drawing and the icon of a character at work move every half second (the state mark turns with them). Off, only that half-second movement stops. The screen is still redrawn when something changes (a task starts or ends, a tool is called, you press something) and by the check that runs every 2 seconds |
 | `theme` | Color theme | `auto` | A value you type: `auto` (follows the Claude Code theme) · `dark` · `light`. Anything else is read as `auto` |
+| `desktopLook` | Desktop meadow and colors | on | In the desktop app's Code tab (local sessions), paints the app's colors and draws a moving meadow behind the conversation. Off, no theme is set when a session starts (another mod's theme is left alone) |
 | `autoOpen` | Open the pane by itself | on | The pane opens by itself when a friend is handed work (where the terminal is 144 columns wide or more). Once you close it by hand, it is not opened again until `/chiikawa` |
 
 ## Language

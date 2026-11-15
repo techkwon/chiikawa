@@ -1,6 +1,6 @@
 {
   "name": "chiikawa",
-  "version": "0.2.2",
+  "version": "0.3.30",
   "description": "Chiikawa mode: Hachiware conducts, and the friends from Chiikawa appear as text drawings to take on tasks and talk them over (Claude subagents + Orca workers). In English, Korean and Japanese.",
   "author": { "name": "techkwon" },
   "license": "MIT",
@@ -65,6 +65,12 @@
       "title": "Color theme",
       "description": "One of auto, dark, light. auto (the default) follows the Claude Code theme (a theme with light in its name is a light one). Set light if the colors look faint on a light terminal",
       "default": "auto"
+    },
+    "desktopLook": {
+      "type": "boolean",
+      "title": "Desktop meadow and colors",
+      "description": "In the desktop app's Code tab (local sessions), paints the app in soft Chiikawa colors and draws a moving meadow behind the conversation: a pink meadow by day, a starry sky in dark mode. /chiikawa look off takes it off and keeps it off; the terminal keeps its own look",
+      "default": true
     },
     "autoOpen": {
       "type": "boolean",

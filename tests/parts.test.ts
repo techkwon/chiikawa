@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { ART_COLUMNS, artRows, ARTS, ICON_COLUMNS, ICON_ROWS, iconOf, SPRITES } from '../hooks/art'
 import { CAST, CORE, isGesture, jobOf, MEMBERS, ORDER, pickMember, readingOf, roleOf, roleOfAgent, rolesFrom, say, shown, specialistOf, toneOf, withRole, WORKERS } from '../hooks/cast'
 import { findFleetRuns, voicedSpecPath } from '../hooks/orca'
-import { cells, fit, planOf, spentBy, ZERO } from '../hooks/view'
+import { cells, ENDED_MS, fit, onStage, planOf, seatOf, spentBy, ZERO } from '../hooks/view'
 import type { Scene } from '../hooks/view'
 import { firstLine, firstLines, leaderSection, MARKS, memberBlock, memberNamed, namedMember, orcaBlock, pickNote, roleNamed, roleNote, unvoiced } from '../hooks/voice'
 import { asIs } from '../hooks/words'
@@ -85,15 +85,37 @@ test('a character at work moves: its feet step and its icon bobs, in the same ro
   for (const id of CORE) expect(artRows(id, 'calm', false, true)[2]).not.toEqual(artRows(id, 'calm')[2])
 })
 
-test('the role picks its own character, the next free one while that one is busy, and a specialist before either', () => {
-  expect(pickMember('구현', [])).toBe('shisa')
-  expect(pickMember('검토', [])).toBe('kurimanju')
-  expect(pickMember('조사', [])).toBe('kani')
+test('치이카와 and 우사기 take the work first; a guest comes only when both are busy, the specialist, then the role\'s own, then any free one', () => {
+  const mains = [task('chiikawa', 'running'), task('usagi', 'running')]
+
+  // The main two first: 우사기 for finding and looking things up, 치이카와 for the rest, a specialist or not.
+  expect(pickMember('구현', [])).toBe('chiikawa')
+  expect(pickMember('검토', [])).toBe('chiikawa')
+  expect(pickMember('지휘', [])).toBe('chiikawa')
+  expect(pickMember('조사', [])).toBe('usagi')
   expect(pickMember('탐색', [])).toBe('usagi')
-  expect(pickMember('구현', [task('shisa', 'running')])).toBe('rakko')
-  expect(pickMember('구현', [task('shisa', 'done')])).toBe('shisa')
-  expect(pickMember('구현', [], 'pochette')).toBe('pochette')
-  expect(pickMember('구현', [task('pochette', 'running')], 'pochette')).toBe('shisa')
+  expect(pickMember('구현', [], 'pochette')).toBe('chiikawa')
+  expect(pickMember('구현', [task('chiikawa', 'running')])).toBe('usagi')
+  expect(pickMember('탐색', [task('usagi', 'running')])).toBe('chiikawa')
+  expect(pickMember('구현', [task('chiikawa', 'done')])).toBe('chiikawa')
+  // With both at work, a guest: the role's own character, the next free one while that one is busy.
+  expect(pickMember('구현', mains)).toBe('shisa')
+  expect(pickMember('검토', mains)).toBe('kurimanju')
+  expect(pickMember('조사', mains)).toBe('kani')
+  expect(pickMember('탐색', mains)).toBe('kani')
+  expect(pickMember('구현', [...mains, task('shisa', 'running')])).toBe('rakko')
+  // A specialist before the role's own, and the role's own while the specialist is busy.
+  expect(pickMember('구현', mains, 'pochette')).toBe('pochette')
+  expect(pickMember('구현', [...mains, task('pochette', 'running')], 'pochette')).toBe('shisa')
+  // With the role's own all busy, any other guest with free hands.
+  expect(pickMember('검토', [...mains, task('kurimanju', 'running'), task('momonga', 'running'), task('rakko', 'running')])).toBe('shisa')
+  // With every hand full, the first main one takes one more.
+  const everyone = WORKERS.map(id => task(id, 'running'))
+
+  expect(pickMember('구현', everyone)).toBe('chiikawa')
+  expect(pickMember('검토', everyone, 'momonga')).toBe('chiikawa')
+  expect(pickMember('조사', everyone)).toBe('usagi')
+  // 하치와레 conducts and 노동 갑옷 씨 takes none.
   expect(WORKERS.includes('rodo')).toBe(false)
   expect(WORKERS.includes('hachiware')).toBe(false)
 })
@@ -105,13 +127,22 @@ test('a role the person gave puts that character first for it, and takes it out 
   expect(roleOf('rakko', given)).toBe('검토')
   expect(jobOf('ko', 'rakko', given)).toBe('검토, 검증')
   expect(jobOf('ko', 'rakko')).toBe('어려운 구현, 디버깅')
+  const mains = [task('chiikawa', 'running'), task('usagi', 'running')]
+
+  // One the person gave the role comes first, before the main two.
   expect(pickMember('검토', [], undefined, given)).toBe('rakko')
-  // Busy, the role's own are next; and it no longer backs up the role it left, nor takes its old specialty.
-  expect(pickMember('검토', [task('rakko', 'running')], undefined, given)).toBe('kurimanju')
-  expect(pickMember('구현', [task('shisa', 'running')], undefined, given)).toBe('pochette')
-  expect(pickMember('구현', [], 'rakko', given)).toBe('shisa')
-  // A role with everyone moved out of it falls back on those it was first given to.
-  expect(pickMember('조사', [], undefined, { kani: '검토', shisa: '검토', usagi: '검토' })).toBe('kani')
+  // Busy, the main two are next, then the role's own; and it no longer backs up the role it left, nor takes its old specialty.
+  expect(pickMember('검토', [task('rakko', 'running')], undefined, given)).toBe('chiikawa')
+  expect(pickMember('검토', [...mains, task('rakko', 'running')], undefined, given)).toBe('kurimanju')
+  expect(pickMember('구현', [...mains, task('shisa', 'running')], undefined, given)).toBe('pochette')
+  expect(pickMember('구현', mains, 'rakko', given)).toBe('shisa')
+  // A main one given another role leaves this one to the other main one, and takes the one it was given first.
+  expect(pickMember('구현', [], undefined, { chiikawa: '검토' })).toBe('usagi')
+  expect(pickMember('검토', [], undefined, { chiikawa: '검토', kurimanju: '구현' })).toBe('chiikawa')
+  expect(pickMember('탐색', [], undefined, { usagi: '구현' })).toBe('chiikawa')
+  // A role with everyone moved out of it falls back on those it was first given to, past the main two.
+  expect(pickMember('조사', [], undefined, { kani: '검토', shisa: '검토', usagi: '검토' })).toBe('chiikawa')
+  expect(pickMember('조사', [task('chiikawa', 'running')], undefined, { kani: '검토', shisa: '검토', usagi: '검토' })).toBe('kani')
   // Its own role again is no change kept; 하치와레 and 노동 갑옷 씨 have no role to change.
   expect(withRole(given, 'rakko', '구현')).toEqual({})
   expect(withRole(given, 'rakko', null)).toEqual({})
@@ -142,9 +173,11 @@ test('the word of a change of roles names who has which role now, and what a rol
   expect(changed).toContain('지금 바뀐 역할: 랏코는 검토(검토, 검증).')
   expect(changed).toContain('나머지 친구는 기본 역할이다: ')
   expect(changed).toContain('시사는 구현(')
-  // A kind of work with its own character goes to that one before the one given the role.
-  for (const note of [reset, changed]) expect(note).toContain('전문 분야가 정해진 일(화면·디자인은 포쉐트 갑옷 씨, 어려운 디버깅은 랏코, 보안·반박 검토는 모몽가, 오타·포맷은 치이카와)은 역할과 상관없이 그 담당이 먼저 맡는다')
-  expect(pickMember('구현', [], 'pochette', { shisa: '구현' })).toBe('pochette')
+  // The specialties are named to the main loop.
+  for (const note of [reset, changed]) expect(note).toContain('손님 가운데서는 전문 분야가 정해진 일(화면·디자인은 포쉐트 갑옷 씨, 어려운 디버깅은 랏코, 보안·반박 검토는 모몽가, 오타·포맷은 치이카와)의 담당이 먼저다')
+  // One the person gave the role comes before the specialist; with it and the main two busy, the specialist comes before the role's own.
+  expect(pickMember('구현', [], 'pochette', { shisa: '구현' })).toBe('shisa')
+  expect(pickMember('구현', [task('shisa', 'running'), task('chiikawa', 'running'), task('usagi', 'running')], 'pochette', { shisa: '구현' })).toBe('pochette')
 })
 
 test('the kind of work tells its specialist', () => {
@@ -865,4 +898,17 @@ test('a path is sure in the forms every shell hands on alike, and in no other', 
       expect(`${command} => ${read(command).length} ${sure(command)}`).toBe(`${command} => 1 `)
     }
   }
+})
+
+test('an ended task marks its friend in the band for a while, and then the friend sits as resting; every friend at work shows its time', () => {
+  const done: Task = { ...task('chiikawa', 'done'), endedAt: 10_000 }
+  const now = (at: number): Scene => ({ ...scene([done]), now: at })
+
+  expect(seatOf(now(10_000 + ENDED_MS), onStage(now(10_000 + ENDED_MS)), 'chiikawa').glyph).not.toBe('')
+  expect(seatOf(now(10_001 + ENDED_MS), onStage(now(10_001 + ENDED_MS)), 'chiikawa').glyph).toBe('')
+
+  // 하치와레 lending hands to the main loop's own work shows how long the stretch has run.
+  const helping: Scene = { ...scene(), now: 65_000, aids: { hachiware: { what: asIs('Bash'), at: 64_000, saidAt: 64_000, since: 0 } } }
+
+  expect(seatOf(helping, onStage(helping), 'hachiware').time).toBe(' 1:05')
 })
