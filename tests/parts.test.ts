@@ -1087,7 +1087,49 @@ test("fleet-run's arguments are turned away as argparse turns them away, before 
   expect(brief('fleet-run codex-build --spec /w/a.md --out /w/b.md --bogus')).toBe('[["codex-build","/w/a.md","/w/b.md",true,null]]')
   expect(brief('fleet-run codex-build --cwd "" --spec /w/a.md --out /w/b.md')).toBe('[["codex-build","/w/a.md","/w/b.md",true,true]]')
   expect(brief('fleet-run codex-build --cwd= --spec /w/a.md --out /w/b.md')).toBe('[["codex-build","/w/a.md","/w/b.md",true,true]]')
+  // Braces and patterns the shell turns into other words leave it unsure, never turned away.
+  expect(brief('fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md --{browser,no-browser}')).toBe('[["codex-build","/w/a.md","/w/b.md",null,null]]')
+  expect(brief('fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md --brow*')).toBe('[["codex-build","/w/a.md","/w/b.md",null,null]]')
+  expect(brief('fleet-run codex-build --cwd /w --spec /w/{a,b}.md --out /w/b.md')[0]).toBe('[')
+  expect(findFleetRuns('fleet-run codex-build --cwd /w --spec /w/{a,b}.md --out /w/b.md')[0]?.isRefused).toBeUndefined()
   // A negative number, a lone dash and a word with a space are values all the same.
   expect(brief('fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md --timeout-min -5')).toBe('[["codex-build","/w/a.md","/w/b.md",null,null]]')
   expect(brief('fleet-run codex-build --cwd /w --spec "- a.md" --out /w/b.md')).toBe('[["codex-build","- a.md","/w/b.md",null,null]]')
+})
+
+test('what shells read each their own way is never taken for sure: no launch is turned away for it, and no path or launch is made of it', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const brief = (command: string): string => JSON.stringify(findFleetRuns(command, '/home/me').map(run => [run.profile, run.spec, run.out, run.isRefused, run.isLacking]))
+
+  // zsh reads these where bash and sh read otherwise, or Python where a reading here would not: fleet-run may take them all.
+  for (const odd of [
+    `{ ${F} }`,
+    `${F} >! log.txt`,
+    'fleet-run codex-build --cwd /w --spec =(true) --out /w/b.md',
+    'fleet-run codex-build --cwd /w --spec /w/a.md --out 12>log.txt',
+    'fleet-run codex-build `true` --cwd /w --spec /w/a.md --out /w/b.md',
+    `${F} \\`,
+    'fleet-run codex-build --cwd /w --spec /w/a.md --out {x}>/dev/null',
+    'fleet-run codex-build --cwd /w --spec -\u0663 --out /w/b.md',
+    'fleet-run codex-build --cwd /w --spec "-1\n" --out /w/b.md',
+  ]) {
+    expect(`${odd} ${findFleetRuns(odd)[0]?.isRefused}`).toBe(`${odd} undefined`)
+  }
+  // A plain redirection is read alike everywhere: what is surely lacking is still told.
+  expect(brief('fleet-run codex-build --spec /w/a.md --out /w/b.md > log 2>&1')).toBe('[["codex-build","/w/a.md","/w/b.md",true,true]]')
+  // An assignment before `export` is made before zsh fills in its arguments, and after bash does.
+  expect(brief('X=/w/old.md; X=/w/new.md export Y=$X; fleet-run codex-build --cwd /w --spec $Y --out /w/b.md')).toBe('[["codex-build",null,"/w/b.md",null,null]]')
+  expect(brief('X=1 export Y=~/a.md; fleet-run codex-build --cwd /w --spec /w$Y --out /w/b.md')).toBe('[["codex-build",null,"/w/b.md",null,null]]')
+  // Past an `exec` of fleet-run, nothing more runs; a loop that makes its variable read-only ends at the next round.
+  expect(findFleetRuns(`exec ${F}; ${F}`)).toHaveLength(1)
+  expect(findFleetRuns(`for t in a b; do readonly t; ${F}; done`)).toHaveLength(1)
+  // Behind any wrapper but `env`, and as a word that assigns, `NAME=` names no program that is run.
+  for (const none of [`nohup X=1 ${F}`, `timeout 5 X=1 ${F}`, `command X=1 ${F}`, `exec X=1 ${F}`, 'a[1]=/w/fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md']) {
+    expect(`${none} ${findFleetRuns(none).length}`).toBe(`${none} 0`)
+  }
+  expect(findFleetRuns(`env X=1 ${F}`)).toHaveLength(1)
+  // A number of two figures before a redirection is a word to zsh, and what it opens to bash: the value after `--out` is not sure.
+  expect(findFleetRuns('zsh -c \'fleet-run grok-research --cwd sub --spec "/w/s p.md" --out 12>x.log "/w/s p.md"\'')[0]?.out).toBeUndefined()
+  // A here-document whose closing word goes on past its quotes is not followed: what it holds is no command.
+  expect(findFleetRuns(`cat <<"E"F\nE\n${F}\nEF`)).toEqual([])
 })

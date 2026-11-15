@@ -344,11 +344,13 @@ const statementsOf = (text: string): Statement[] | undefined => {
       if (here !== null) {
         waiting.push({ mark: here[2] ?? here[3] ?? here[4] ?? '', isIndented: here[1] === '-', isFilled: here[4] !== undefined && !here[0].includes('\\'), owner: statements.length })
         // A closing line written partly in quotes is not the one read here.
-        if (/^[^\s;&|()<>]$/.test(text[at + here[0].length] ?? '')) isOdd = true
+        if (/^[^\s;&|()<>]$/.test(text[at + here[0].length] ?? '')) return undefined
       }
       // A redirection parts two words, and an operator ends the statement.
       if (sign !== null) {
-        if (word !== undefined && REDIRECTED.test(bareOf(word) ?? '')) {
+        // A number of two figures or more before it is what it opens to bash and sh, and a word of its own to zsh: it is no word that is sure.
+        if (word !== undefined && /^\d{2,}$/.test(bareOf(word) ?? '')) word.isCut = true
+        else if (word !== undefined && REDIRECTED.test(bareOf(word) ?? '')) {
           // `{name}>` assigns the variable the number of what it opens.
           if (bareOf(word)?.startsWith('{') === true) isOdd = true
           word = undefined
@@ -394,7 +396,8 @@ const nameOf = (word: Word | undefined): string | undefined => {
   const text = pieces.map(piece => piece.text).join('')
   const name = text.slice(text.lastIndexOf('/') + 1)
 
-  return word === undefined || pieces.some(piece => piece.quote === '(') || /[$`\\]/.test(name) ? undefined : name
+  // A word with `=` before its path, as `a[1]=/x/fleet-run`, assigns, or names no program at all.
+  return word === undefined || pieces.some(piece => piece.quote === '(') || /[$`\\]/.test(name) || /^[^/]*=/.test(text) ? undefined : name
 }
 
 /** What a word assigns, where it is an assignment: `NAME=` at its start, written bare. */
@@ -535,10 +538,13 @@ export const tidyPath = (path: string): string => {
 }
 
 /** Whether the shell may part a word into several: something is filled in where no quotes hold it. */
-const isSplit = (word: Word): boolean => word.pieces.some(piece => piece.quote === '(' || (piece.quote === '' && /[$`]/.test(piece.text)) || isUnknown(piece.text))
+const isSplit = (word: Word): boolean => isExpanding(word) || word.pieces.some(piece => piece.quote === '(' || (piece.quote === '' && /[$`]/.test(piece.text)) || isUnknown(piece.text))
+
+/** Whether the shell may make several words of a word, or other ones, out of braces or a match against files. */
+const isExpanding = (word: Word): boolean => word.pieces.some(piece => piece.quote === '' && /[*?[{]/.test(piece.text))
 
 /** Whether argparse takes a word as an option rather than as a value: a dash before it, unless it is one alone, a negative number or holds a space. */
-const isOptionLike = (text: string): boolean => text.startsWith('-') && text !== '-' && !/^-(?:\d+|\d*\.\d+)$/.test(text) && !text.includes(' ')
+const isOptionLike = (text: string): boolean => /^-[A-Za-z-]/.test(text) && !/\s/.test(text)
 
 /** Whether text holds a place a script handed on fills with what is not known here: it may come to nothing, or to several words. */
 const isUnknown = (text: string): boolean => text.includes('\0')
@@ -611,7 +617,8 @@ const fleetArgsOf = (args: readonly Word[]): { profile?: Word; values: Map<strin
     const equals = head.startsWith('--') ? head.indexOf('=') : -1
     const known = equals > 0 ? head : literalOf(word)
     // What is filled in after `=` is the option's value: its name is still known.
-    const text = known === undefined || isUnknown(equals > 0 ? known.slice(0, equals) : known) ? undefined : known
+    // A word the shell may part or match against files, as `--{browser,no-browser}`, is not sure to reach it as written.
+    const text = known === undefined || isUnknown(equals > 0 ? known.slice(0, equals) : known) || (equals <= 0 && isExpanding(word)) ? undefined : known
 
     if (text === undefined) {
       if (profile === undefined) profile = word
@@ -907,7 +914,10 @@ const loopOf = (statements: readonly Statement[], index: number): { name: string
       depth += KEYWORDS.get(bareOf(next[key]) ?? '') ?? 0
       if (depth !== 0) continue
       // A body that may leave the loop, or a round of it, early does not run once for each word.
-      const isCut = statements.slice(index + 1, at).some(one => one.words.some(word => LEAVES.has(word.pieces.map(piece => (piece.quote === '' ? piece.text.replace(/\\/g, '') : piece.text)).join(''))))
+      // So does one that may make its variable read-only, which ends the loop at the next round.
+      const isCut = statements
+        .slice(index + 1, at)
+        .some(one => one.words.some(word => LEAVES.has(word.pieces.map(piece => (piece.quote === '' ? piece.text.replace(/\\/g, '') : piece.text)).join('')) || ['readonly', ...DECLARES].includes(bareOf(word) ?? '')))
 
       return isCut ? undefined : { name, items: items.filter(item => item !== undefined), end: at }
     }
@@ -1021,7 +1031,8 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
         while (name === 'timeout' || (name !== undefined && WRAPPERS.has(name))) {
           wrappers.push(name)
           at += name === 'timeout' ? 2 : 1
-          while (assigned(words[at]) !== null) at += 1
+          // Only `env` takes assignments before its command: behind any other the word is the program's name, and no such program is run.
+          if (name === 'env') while (assigned(words[at]) !== null) at += 1
           name = nameOf(words[at])
         }
         const args = words.slice(at + 1)
@@ -1039,6 +1050,8 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
         const text = handed === undefined ? undefined : scriptOf(handed.word, shell)
 
         if (run !== undefined) runs.push(run)
+        // Past an `exec` that surely runs a program, this shell runs nothing more: the program took its place.
+        if (wrappers.includes('exec') && isRun && run !== undefined) return runs
         // The shell a script is handed to has this one's home directory only while this one has the one it began with, and is given no other.
         if (handed !== undefined && text !== undefined) {
           const inner = runsIn(text.text, shell.vars.get('HOME') === home && !lent.includes('HOME') ? home : undefined, shell.isLost || !handed.isPlain, shell.budget)
@@ -1051,7 +1064,12 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
         if (wrappers.includes('exec') && !isRun) lose(shell)
         else if (wrappers.includes('exec')) forget(shell)
         else if (wrappers.length > 0 && ASSIGNERS.has(bareOf(words[at]) ?? '')) affect(words[at], args, shell, false)
-        else if (wrappers.every(one => one === 'command') && !(wrappers.length > 0 && /^-[vV]$/.test(bareOf(words[at]) ?? ''))) affect(words[at], args, shell, isRun)
+        // An assignment before `export` or `readonly` is made before the arguments are filled in by zsh, and after by bash: what it
+        // assigns is not sure.
+        else if (wrappers.every(one => one === 'command') && !(wrappers.length > 0 && /^-[vV]$/.test(bareOf(words[at]) ?? ''))) {
+          affect(words[at], args, shell, isRun)
+          if (prefixed.length > 0 && ASSIGNERS.has(bareOf(words[at]) ?? '')) strike(args, shell)
+        }
         // Yet what is assigned before a command may outlast it, as before `export` or a special builtin of `sh`: what the variable held before is not sure after.
         strike(prefixed, shell)
       }
@@ -1086,7 +1104,22 @@ const runsIn = (script: string, home: string | undefined, isLost: boolean, budge
  * command prints) is none, and neither is one in a function's body, which
  * runs only where the function is called.
  */
-export const findFleetRuns = (command: string, home?: string): FleetRun[] => runsIn(command, home, false)
+export const findFleetRuns = (command: string, home?: string): FleetRun[] => {
+  const runs = runsIn(command, home, false)
+
+  // That fleet-run turns a launch away is told only from a command with nothing in it that shells read each their own way.
+  return isPlainScript(command) ? runs : runs.map(({ isRefused: _isRefused, isLacking: _isLacking, ...run }) => run)
+}
+
+/** The plain redirections every shell reads alike: to a file, or onto one of the three first. */
+const PLAIN_REDIRECT = /(^|[\s;&|])(?:[012]?>>?|<)(?:&[012-]|[ \t]*[\w./~@%+,:-]+)/g
+
+/** Whether a command holds only what bash, sh and zsh read alike: words, plain quotes, variables, plain redirections and operators. */
+const isPlainScript = (command: string): boolean => {
+  const bare = command.replace(PLAIN_REDIRECT, '$1')
+
+  return /^[\w./:@%+,=~\- \t\n"';&|$]*$/.test(bare) && !/(?:^|\s)=/.test(bare) && !/\$(?![A-Za-z_])/.test(bare)
+}
 
 /** Where a character's copy of a spec goes: beside it, one name on, the character's own so that two do not share one. */
 export const voicedSpecPath = (spec: string, who: string): string =>
