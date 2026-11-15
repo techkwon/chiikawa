@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { ART_COLUMNS, artRows, ARTS, ICON_COLUMNS, ICON_ROWS, iconOf, SPRITES } from '../hooks/art'
 import { CAST, CORE, isGesture, jobOf, MEMBERS, ORDER, pickMember, readingOf, roleOf, roleOfAgent, rolesFrom, say, shown, specialistOf, toneOf, withRole, WORKERS } from '../hooks/cast'
-import { findFleetRuns, voicedSpecPath } from '../hooks/orca'
+import { findFleetRuns, tidyPath, voicedSpecPath } from '../hooks/orca'
 import { pictureState } from '../hooks/desk'
 import { cardOf, cells, ENDED_MS, fit, onStage, planOf, seatOf, spentBy, ZERO } from '../hooks/view'
 import type { Scene } from '../hooks/view'
@@ -533,7 +533,7 @@ test("a fleet-run's paths are filled in as the shell fills them, and left as wri
 
   expect(run?.spec).toBe('/fixture/a.md')
   expect(prefixed.slice(run?.specSpan?.[0], run?.specSpan?.[1])).toBe('$X')
-  expect(findFleetRuns('X=/fixture/b.md fleet-run codex-build --spec "$X"')[0]).toEqual({ profile: 'codex-build', title: 'codex-build', hasOut: false, isBackground: false, isDetached: false })
+  expect(findFleetRuns('X=/fixture/b.md fleet-run codex-build --spec "$X"')[0]).toEqual({ profile: 'codex-build', title: 'codex-build', hasOut: false, isBackground: false, isDetached: false, isRefused: true, isLacking: true })
 
   // Single quotes keep `$` and `~` as they are written, and so do double quotes a `~`.
   const spec = (command: string): string | undefined => findFleetRuns(command, '/home/me')[0]?.spec
@@ -547,7 +547,6 @@ test("a fleet-run's paths are filled in as the shell fills them, and left as wri
   for (const command of [
     'X=/fixture/a.md; [ -d /w ] && X=/fixture/b.md; fleet-run codex-build --spec $X',
     'X=/fixture/a.md; (X=/fixture/b.md); fleet-run codex-build --spec $X',
-    'X=/fixture/a.md; for turn in 1 2; do fleet-run codex-build --spec $X; X=/fixture/b.md; done',
     'X="$(pwd)/a.md"; fleet-run codex-build --spec "$X"',
     'X=/fixture/a.md; read X; fleet-run codex-build --spec $X',
     'fleet-run codex-build --spec $UNSET/a.md',
@@ -557,6 +556,8 @@ test("a fleet-run's paths are filled in as the shell fills them, and left as wri
 
     expect(`${command} ${unsure?.profile} ${unsure?.spec} ${unsure?.specSpan}`).toBe(`${command} codex-build undefined undefined`)
   }
+  // A loop through words written out runs its body once for each, each round going on from what the one before assigned.
+  expect(findFleetRuns('X=/fixture/a.md; for turn in 1 2; do fleet-run codex-build --spec $X; X=/fixture/b.md; done').map(run => run.spec)).toEqual(['/fixture/a.md', '/fixture/b.md'])
   // One made for sure, in the shell the launch runs in, does.
   expect(spec('X=/fixture/a.md; export X=/fixture/b.md; if true; then fleet-run codex-build --spec $X; fi')).toBe('/fixture/b.md')
 })
@@ -931,4 +932,162 @@ test('a friend with one task running and a newer one waiting is shown at work, a
 
   expect(cardOf('usagi', waiting).status).toMatch(/^◐/)
   expect(pictureState(waiting, cardOf('usagi', waiting))).toBe('waiting')
+})
+
+test("fleet-run's options are read as its argparse reads them: cut short, after the profile or before it, and a launch it turns away is told", () => {
+  const [cut] = findFleetRuns('fleet-run codex-scout --cw /w --sp /w/a.md --ou=/w/a.out.md')
+
+  expect([cut?.spec, cut?.out, cut?.isRefused]).toEqual(['/w/a.md', '/w/a.out.md', undefined])
+  const [first] = findFleetRuns('fleet-run --cwd /w codex-build --spec /w/a.md --out /w/a.out.md --no-browser')
+
+  expect([first?.profile, first?.spec, first?.isRefused]).toEqual(['codex-build', '/w/a.md', undefined])
+  // An option it needs missing, a flag given a value, or one it does not know: it stops before any worker.
+  for (const command of [
+    'fleet-run codex-scout --spec /w/a.md --out /w/a.out.md',
+    'fleet-run codex-scout --cwd /w --spec /w/a.md',
+    'fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.out.md --brows=yes',
+    'fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.out.md --worktree x',
+    'fleet-run codex-scout extra --cwd /w --spec /w/a.md --out /w/a.out.md',
+    'fleet-run codex-scout --cwd /w --spec /w/a.md --out',
+  ]) expect(`${command} ${findFleetRuns(command)[0]?.isRefused}`).toBe(`${command} true`)
+  // An option whole in quotes, the profile after `--`, and words the shell fills in, which may come to nothing: none is turned away.
+  for (const command of [
+    'fleet-run codex-scout "--cwd=/w" --spec /w/a.md --out /w/b.md',
+    'fleet-run --cwd /w --spec /w/a.md --out /w/b.md -- codex-scout',
+    'EXTRA=; fleet-run codex-scout $EXTRA --cwd /w --spec /w/a.md --out /w/b.md',
+    'fleet-run codex-scout $ARGS',
+    "ARGS='/w --spec /w/a.md'; fleet-run codex-scout --cwd $ARGS --out /w/b.md",
+    'fleet-run codex-scout --cwd /w --spec"=/w/a.md" --out /w/b.md',
+  ]) {
+    const [run] = findFleetRuns(command)
+
+    expect(`${command} ${run?.profile} ${run?.isRefused}`).toBe(`${command} codex-scout undefined`)
+  }
+  // Help and a dry run start no worker at all.
+  expect(findFleetRuns('fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.out.md --dry-run')).toEqual([])
+  expect(findFleetRuns('fleet-run codex-scout -h')).toEqual([])
+})
+
+test('a result path is one file however it is written', () => {
+  // A `..` may follow a link: it stays as written.
+  expect(findFleetRuns('fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a/./b/../find.out.md')[0]?.out).toBe('/w/a/b/../find.out.md')
+  expect(findFleetRuns('fleet-run codex-scout --cwd . --spec a.md --out ./runs//find.out.md')[0]?.out).toBe('runs/find.out.md')
+  expect(tidyPath('../a/./b')).toBe('../a/b')
+  expect(tidyPath('/var/../a')).toBe('/var/../a')
+})
+
+test('a loop through words written out launches once for each, with its variable holding that word; other loops are read once', () => {
+  const each = (command: string): string[] => findFleetRuns(command, '/home/me').map(run => `${run.spec} ${run.out} ${run.isBackground} ${run.specSpan}`)
+
+  expect(each('RUN=/w/r; for t in a b; do fleet-run codex-scout --cwd /w --spec $RUN/$t.md --out $RUN/$t.out.md & done; wait')).toEqual([
+    '/w/r/a.md /w/r/a.out.md true undefined',
+    '/w/r/b.md /w/r/b.out.md true undefined',
+  ])
+  expect(each('for t in a; do for u in x y; do fleet-run codex-scout --cwd /w --spec /w/$t/$u.md --out /w/$t/$u.out; done; done')).toEqual([
+    '/w/a/x.md /w/a/x.out false undefined',
+    '/w/a/y.md /w/a/y.out false undefined',
+  ])
+  expect(each('if true; then for t in a b; do fleet-run codex-scout --cwd /w --spec /w/$t.md --out /w/$t.o; done; fi')).toHaveLength(2)
+  // What the shell matches, and a loop that runs while something holds, are not counted: each is one launch, its paths unsure.
+  expect(each('for t in *.md; do fleet-run codex-scout --cwd /w --spec $t --out o.md; done')).toEqual(['undefined o.md false undefined'])
+  expect(each('while true; do fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/b.md; done')).toHaveLength(1)
+  // A variable the body sets again holds, in the next round, what it was set to; one set where it is not sure is not sure from then on.
+  expect(each('X=/w/a.md; for t in 1 2; do fleet-run codex-scout --cwd /w --spec $X --out /w/$t.o; X=/w/b.md; done').map(one => one.split(' ')[0])).toEqual(['/w/a.md', '/w/b.md'])
+  expect(each('X=/w/a.md; N=X; for t in 1 2; do fleet-run codex-scout --cwd /w --spec "$X" --out /w/$t.o; printf -v "$N" %s /w/b.md; done').map(one => one.split(' ')[0])).toEqual(['/w/a.md', 'undefined'])
+  // What a round left past all following, `eval` among it, holds after the loop as it does after an `eval` anywhere.
+  expect(each('for t in 1 2; do eval "$CMD"; done; fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/b.md').map(one => one.split(' ')[0])).toEqual(each('eval "$CMD"; fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/b.md').map(one => one.split(' ')[0]))
+  // A variable the shell keeps for itself does not hold the word: the loop is read once, its paths unsure.
+  expect(each('for RANDOM in 1 2; do fleet-run codex-scout --cwd /w --spec /w/$RANDOM.md --out /w/$RANDOM.o; done')).toEqual(['undefined undefined false undefined'])
+  // A body that may leave early is read once.
+  expect(each('for t in a b; do fleet-run codex-scout --cwd /w --spec /w/$t.md --out /w/$t.o; break; done')).toHaveLength(1)
+  expect(each('for t in a b; do fleet-run codex-scout --cwd /w --spec /w/$t.md --out /w/$t.o; "break"; done')).toHaveLength(1)
+  expect(each('for t in a b; do exec fleet-run codex-scout --cwd /w --spec /w/$t.md --out /w/$t.o; done')).toHaveLength(1)
+  // A round that runs what is not known, which may be `break`, leaves the rounds after it unsure: they are not read.
+  expect(each('STOP=break; for t in a b; do fleet-run codex-scout --cwd /w --spec /w/$t.md --out /w/$t.o; "$STOP"; done')).toHaveLength(1)
+  expect(each('for t in a b; do fleet-run codex-scout --cwd /w --spec /w/$t.md --out /w/$t.o; $LEAVE; done')).toHaveLength(1)
+  expect(each('for t in ~ a; do fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/$t.out.md; done')).toEqual(['/w/a.md undefined false 55,62'])
+  expect(each('for t in =sh a; do fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/$t.out.md; done')).toEqual(['/w/a.md undefined false 57,64'])
+  // A loop in a shell of its own leaves what follows the shell as sure as ever.
+  expect(each('(for t in a b; do true; done); X=/w; fleet-run codex-scout --cwd /w --spec $X/a.md --out $X/b.md')).toEqual(['/w/a.md /w/b.md false 75,82'])
+  expect(each('for t in a b; do fleet-run codex-scout --cwd /w --spec /w/$t.md --out /w/$t.o; \\break; done')).toHaveLength(1)
+  // Loops in loops are read over only so much, all told: the command is read at once all the same.
+  const deep = `${'for a in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do '.repeat(5)}true${'; done'.repeat(5)}; fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/b.md`
+  const began = Date.now()
+
+  expect(each(deep)).toHaveLength(1)
+  expect(Date.now() - began).toBeLessThan(500)
+})
+
+test('fleet-run run by its Python interpreter, given its path, is a launch too', () => {
+  expect(findFleetRuns('python3 ~/.claude/skills/orca-fleet/scripts/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/b.md', '/home/me')[0]?.spec).toBe('/w/a.md')
+  expect(findFleetRuns('python3 -u /x/fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md')[0]?.profile).toBe('codex-build')
+  expect(findFleetRuns('python3 other.py codex-scout --cwd /w --spec /w/a.md --out /w/b.md')).toEqual([])
+  // Code or a module given to it runs no file: `-c fleet-run` is Python's own words.
+  expect(findFleetRuns('python3 -c fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')).toEqual([])
+  expect(findFleetRuns('python3 -uc fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')).toEqual([])
+  expect(findFleetRuns('python3 -m fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')).toEqual([])
+  expect(findFleetRuns('python3 -W ignore /x/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')[0]?.spec).toBe('/w/a.md')
+  // A value run together with its option is no option of its own: the `h` and `c` in it ask for nothing.
+  expect(findFleetRuns('python3 -Xfaulthandler /x/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')[0]?.spec).toBe('/w/a.md')
+  expect(findFleetRuns('python3 -uWignore::DeprecationWarning /x/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')[0]?.spec).toBe('/w/a.md')
+  expect(findFleetRuns('python3 -uX dev /x/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')[0]?.spec).toBe('/w/a.md')
+  expect(findFleetRuns('python3 -hX dev /x/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')).toEqual([])
+  expect(findFleetRuns('python3 -z /x/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')).toEqual([])
+  expect(findFleetRuns('python3 -OOBs /x/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o')[0]?.spec).toBe('/w/a.md')
+  for (const asked of ['--version', '-V', '-h', '--help', '-uV']) expect(findFleetRuns(`python3 ${asked} /x/fleet-run codex-scout --cwd /w --spec /w/a.md --out /w/a.o`)).toEqual([])
+})
+
+test('a spec value that opens at its quotes is written over whole, quotes and all; one that opens inside them is not written over', () => {
+  const command = 'D=/w; fleet-run codex-scout --cwd /w --spec="$D"/a.md --out /w/o.md'
+  const [run] = findFleetRuns(command)
+
+  expect(run?.spec).toBe('/w/a.md')
+  expect(command.slice(run?.specSpan?.[0], run?.specSpan?.[1])).toBe('"$D"/a.md')
+  // A character escaped with a backslash starts at the backslash, after the `=`.
+  for (const [written, path] of [['--spec=\\a.md', '\\a.md'], ['--spec="a".md', '"a".md'], ['--spec \\a.md', '\\a.md'], ["--spec='a'.md", "'a'.md"]]) {
+    const line = `fleet-run codex-scout --cwd /w ${written} --out /w/o.md`
+    const [one] = findFleetRuns(line)
+
+    expect(line.slice(one?.specSpan?.[0], one?.specSpan?.[1])).toBe(path)
+  }
+  const inside = 'D=/w; fleet-run codex-scout --cwd /w "--spec=$D"/a.md --out /w/o.md'
+  const [cut] = findFleetRuns(inside)
+
+  expect(cut?.profile).toBe('codex-scout')
+  expect(cut?.specSpan).toBeUndefined()
+})
+
+test('a word a script handed on fills with what is not known here may come to nothing or to options: fleet-run is not taken to turn it away', () => {
+  expect(findFleetRuns('orca terminal create --title t --command "fleet-run codex-build $FLAGS --cwd /w --spec /w/a.md --out /w/b.md" --json')[0]?.isRefused).toBeUndefined()
+  expect(findFleetRuns('F="--no-browser --timeout-min 5"; bash -lc "fleet-run codex-build $F --cwd /w --spec /w/a.md --out /w/b.md"')[0]?.isRefused).toBeUndefined()
+  expect(findFleetRuns('sh -c "fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md $EXTRA"')[0]?.isRefused).toBeUndefined()
+  expect(findFleetRuns('sh -c "fleet-run codex-build --cwd /w --spec /w/a.md --out $OUT"')[0]?.isRefused).toBeUndefined()
+  // A word it surely does not take is still turned away, and said so.
+  const odd = findFleetRuns('sh -c "fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md --bogus"')[0]
+
+  expect(odd?.isRefused).toBe(true)
+  expect(odd?.isLacking).toBeUndefined()
+  expect(findFleetRuns('fleet-run codex-build --spec /w/a.md --out /w/b.md')[0]?.isLacking).toBe(true)
+})
+
+test("fleet-run's arguments are turned away as argparse turns them away, before the paths it lacks are looked at; what a script handed on fills in is not sure", () => {
+  const brief = (command: string): string => JSON.stringify(findFleetRuns(command).map(run => [run.profile, run.spec, run.out, run.isRefused, run.isLacking]))
+
+  expect(brief('fleet-run --spec=$S codex-build --cwd /w --out /w/b.md')).toBe('[["codex-build",null,"/w/b.md",null,null]]')
+  expect(brief('sh -c "fleet-run --spec=$S codex-build --cwd /w --out /w/b.md"')).toBe('[["codex-build",null,"/w/b.md",null,null]]')
+  expect(brief('orca terminal create --command "fleet-run --cwd=$C codex-build --spec /w/a.md --out /w/b.md"')).toBe('[["codex-build","/w/a.md","/w/b.md",null,null]]')
+  expect(brief('C="/a b"; sh -c "fleet-run --cwd=$C codex-build --spec /w/a.md --out /w/b.md"')).toBe('[["codex-build","/w/a.md","/w/b.md",null,null]]')
+  expect(brief('sh -c "for x in $A b; do fleet-run codex-build --cwd /w --spec /w/\\$x.md --out /w/\\$x.out.md; done"')).toBe('[["codex-build",null,null,null,null]]')
+  expect(brief('for x in $A b; do fleet-run codex-build --cwd /w --spec /w/$x.md --out /w/$x.out.md; done')).toBe('[["codex-build",null,null,null,null]]')
+  expect(brief('fleet-run codex-build --cwd /w --spec -a.md --out /w/b.md')).toBe('[["codex-build",null,"/w/b.md",true,null]]')
+  expect(brief('fleet-run codex-build --browser=1 --spec /w/a.md --out /w/b.md')).toBe('[["codex-build","/w/a.md","/w/b.md",true,null]]')
+  expect(brief('for x in ~/a; do fleet-run codex-build --cwd /w --spec $x --out /w/b.md; done')).toBe('[["codex-build",null,"/w/b.md",null,null]]')
+  expect(brief('for x in a=b.md; do fleet-run codex-build --cwd /w --spec "$x" --out /w/b.md; done')).toBe('[["codex-build","a=b.md","/w/b.md",null,null]]')
+  expect(brief('sh -c "fleet-run $P codex-build --cwd /w --spec /w/a.md --out /w/b.md"')).toBe('[]')
+  expect(brief('fleet-run codex-build --spec /w/a.md --out /w/b.md --bogus')).toBe('[["codex-build","/w/a.md","/w/b.md",true,null]]')
+  expect(brief('fleet-run codex-build --cwd "" --spec /w/a.md --out /w/b.md')).toBe('[["codex-build","/w/a.md","/w/b.md",true,true]]')
+  expect(brief('fleet-run codex-build --cwd= --spec /w/a.md --out /w/b.md')).toBe('[["codex-build","/w/a.md","/w/b.md",true,true]]')
+  // A negative number, a lone dash and a word with a space are values all the same.
+  expect(brief('fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md --timeout-min -5')).toBe('[["codex-build","/w/a.md","/w/b.md",null,null]]')
+  expect(brief('fleet-run codex-build --cwd /w --spec "- a.md" --out /w/b.md')).toBe('[["codex-build","- a.md","/w/b.md",null,null]]')
 })

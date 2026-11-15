@@ -37,6 +37,8 @@ export type Scene = {
   roles: Roles
   /** What each character's tasks have cost so far, whatever has become of the tasks. */
   paid: Partial<Record<MemberId, Tokens>>
+  /** The tasks ended today, counted as they ended: past the tasks kept and a plain clear. */
+  today?: { done: number; failed: number }
 }
 
 /** The room a pane has: the cells across its body, and the rows it may take. */
@@ -416,11 +418,18 @@ const TalkRow = (kit: Kit, lang: Lang, said: Said, width: number, key: string): 
 /** What stands for the conversation before anything was said: 하치와레, waiting for work. */
 export const waitingSaid: Said = { member: LEAD, quote: inAll(lang => CAST[lang].leader.idle), note: inAll(lang => WORDS[lang].awaiting), at: 0, mood: 'calm' }
 
+/** What stands for the conversation before anything was said: 하치와레 waiting for work, or at it himself where his card says he is. */
+export const quietSaid = (scene: Scene): Said => {
+  const own = busyOf(scene).length === 0 ? aidOf(scene, LEAD) : undefined
+
+  return own === undefined ? waitingSaid : { ...waitingSaid, note: inAll(lang => `${WORDS[lang].alone} · ${own.what[lang]}`) }
+}
+
 /** The last lines of the conversation, oldest first, beside the picture of whoever spoke last. */
 const Talk = (kit: Kit, scene: Scene, width: number, lines: number, withPicture: boolean): RenderElement => {
   const { Box } = kit
-  const said = scene.feed.length === 0 ? [waitingSaid] : scene.feed.slice(-Math.max(1, lines))
-  const latest = said[said.length - 1] ?? waitingSaid
+  const said = scene.feed.length === 0 ? [quietSaid(scene)] : scene.feed.slice(-Math.max(1, lines))
+  const latest = said[said.length - 1] ?? quietSaid(scene)
   const room = withPicture ? width - ART_COLUMNS - 1 : width
 
   return (
@@ -514,7 +523,7 @@ export const shownOf = (scene: Scene, count: number): { from: number; to: number
 /** The last lines of the conversation as cuts down a page, oldest first: the friends on the left, 하치와레 answering from the right. */
 const Page = (kit: Kit, scene: Scene, width: number, count: number): RenderElement => {
   const { from, to } = shownOf(scene, count)
-  const said = scene.feed.length === 0 ? [waitingSaid] : scene.feed.slice(from, to)
+  const said = scene.feed.length === 0 ? [quietSaid(scene)] : scene.feed.slice(from, to)
 
   return (
     <kit.Box flexDirection="column" width={width}>
@@ -735,7 +744,8 @@ export type Card = {
 
 /** The day so far, for 하치와레's card: the tasks that ended well, and the ones that failed; nothing before any has ended. */
 const tally = (scene: Scene): { done: number; failed: number } | undefined => {
-  // A demonstration is no work done: its pretend ends are not counted.
+  if (scene.today !== undefined) return scene.today
+  // Before any end was counted for the day, the tasks kept are: a demonstration is no work done, its pretend ends not counted.
   const ended = scene.tasks.filter(task => !isActive(task) && task.due === undefined)
   const failed = ended.filter(task => task.status === 'failed').length
 
@@ -1479,7 +1489,7 @@ export const drawPane = (kit: Kit, scene: Scene, isOn: boolean, room: Room, acts
       <Box flexDirection="column" width={width}>
         {title}
         {TalkRule(kit, scene, plan.talk, width, acts)}
-        {isFull ? Page(kit, scene, width, plan.talk) : (scene.feed.length === 0 ? [waitingSaid] : scene.feed.slice(from, to)).map((one, index) => TalkRow(kit, scene.lang, one, width, `said-${one.at}-${index}`))}
+        {isFull ? Page(kit, scene, width, plan.talk) : (scene.feed.length === 0 ? [quietSaid(scene)] : scene.feed.slice(from, to)).map((one, index) => TalkRow(kit, scene.lang, one, width, `said-${one.at}-${index}`))}
       </Box>
     )
   }

@@ -122,6 +122,8 @@ declare module 'claude-code' {
       tasks: Task[]
       now: number
       waveAt: number
+      /** When the demonstration's wave began. */
+      demoWaveAt: number
       isPaneOpen: boolean
       /** The person closed the pane by hand: it stays closed until they ask for it. */
       isPaneDismissed: boolean
@@ -172,6 +174,8 @@ declare module 'claude-code' {
       paid: Partial<Record<MemberId, Tokens>>
       /** The agents whose records were let go while how they ended was a guess, each with its character: what its own turn says it cost is still that character's. */
       owed: { id: string; member: MemberId }[]
+      /** The tasks ended today, by how they went: what 하치와레's card counts, past the tasks kept and a plain clear. */
+      today: { day: string; done: string[]; failed: string[]; sure?: string[] }
       /** The language of the screen and of the characters' voices, where the mode's own setting leaves it to the person. */
       lang: Lang
       /** What the person chose and what they type in, kept over sessions in the store. */

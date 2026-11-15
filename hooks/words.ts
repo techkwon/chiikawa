@@ -202,6 +202,9 @@ export type Words = {
   /** Its result file is one another worker is still waited for at. */
   sharedOut: string
   launchFailed: string
+  /** fleet-run turned the launch away before any worker started. */
+  turnedAway: string
+  turnedAwayOdd: string
   stopped: string
   unseen: string
   apiError: string
@@ -412,6 +415,8 @@ const KO: Words = {
   noPath: '결과 파일 경로를 읽지 못해서, 끝났는지는 직접 확인해야 해요',
   sharedOut: '다른 작업이 같은 결과 파일을 쓰고 있어서, 이 작업의 결과는 직접 확인해야 해요',
   launchFailed: '실행 명령이 오류로 끝남',
+  turnedAway: 'fleet-run이 바로 돌려보냄 (--cwd, --spec, --out 필요)',
+  turnedAwayOdd: 'fleet-run이 바로 돌려보냄 (받지 않는 인자가 있음)',
   stopped: '중단됨',
   unseen: '결과는 직접 확인',
   apiError: 'API 오류',
@@ -619,6 +624,8 @@ const EN: Words = {
   noPath: 'The path of the result file could not be read, so please check yourself whether it has finished',
   sharedOut: 'Another task is using the same result file, so please check the result of this one yourself',
   launchFailed: 'the launch command ended in an error',
+  turnedAway: 'fleet-run turned it away (it needs --cwd, --spec and --out)',
+  turnedAwayOdd: 'fleet-run turned it away (it was given an argument it does not take)',
   stopped: 'stopped',
   unseen: 'check the result yourself',
   apiError: 'API error',
@@ -822,6 +829,8 @@ const JA: Words = {
   noPath: '結果ファイルのパスを読み取れなかったので、終わったかどうかは直接確認してください',
   sharedOut: 'ほかの作業が同じ結果ファイルを使っているので、この作業の結果は直接確認してください',
   launchFailed: '実行コマンドがエラーで終了',
+  turnedAway: 'fleet-run がすぐに断った（--cwd・--spec・--out が必要）',
+  turnedAwayOdd: 'fleet-run がすぐに断った（受け付けない引数がある）',
   stopped: '中断',
   unseen: '結果は直接確認',
   apiError: 'APIエラー',

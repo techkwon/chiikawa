@@ -51,6 +51,8 @@ const isOn = atom({ plugin: 'chiikawa', key: 'isOn' } as const, true)
 const tasks = atom({ plugin: 'chiikawa', key: 'tasks' } as const, [])
 const clockNow = atom({ plugin: 'chiikawa', key: 'now' } as const, 0)
 const waveAt = atom({ plugin: 'chiikawa', key: 'waveAt' } as const, 0)
+/** When the demonstration's wave began: real work and a demonstration are each counted from their own start. */
+const demoWaveAt = atom({ plugin: 'chiikawa', key: 'demoWaveAt' } as const, 0)
 const isPaneOpen = atom({ plugin: 'chiikawa', key: 'isPaneOpen' } as const, false)
 const usage = atom({ plugin: 'chiikawa', key: 'usage' } as const, null)
 const leaderTokens = atom({ plugin: 'chiikawa', key: 'leaderTokens' } as const, { fresh: 0, cached: 0, out: 0 })
@@ -78,6 +80,58 @@ const roleVersion = atom({ plugin: 'chiikawa', key: 'roleVersion' } as const, 0)
 const toldRoleVersion = atom({ plugin: 'chiikawa', key: 'toldRoleVersion' } as const, 0)
 const paid = atom({ plugin: 'chiikawa', key: 'paid' } as const, {})
 const owed = atom({ plugin: 'chiikawa', key: 'owed' } as const, [])
+const today = atom({ plugin: 'chiikawa', key: 'today' } as const, { day: '', done: [], failed: [] })
+/** How many of a day's ends are told apart: enough for any day's work. */
+const TODAY_KEPT = 2000
+
+/** The day a moment falls on, where the person is. */
+const dayOf = (at: number): string => {
+  const date = new Date(at)
+
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
+}
+
+/** How many times all was cleared: an end begun to be settled before the last time is not counted. */
+let clears = 0
+
+/** Where a day stands among others, for days written as `dayOf` writes them; none is before any. */
+const dayRank = (day: string): number => {
+  const [year = 0, month = 0, date = 0] = day.split('-').map(Number)
+
+  return year * 10_000 + month * 100 + date
+}
+
+/**
+ * Counts a task's end in the day's work, once, as it went last: a guess overruled moves it. A demonstration is no work done. An end
+ * that is sure is not moved by a guess, even one that, held long, is counted after it.
+ */
+const countEnd = async ($: Engine, id: string, isFailed: boolean, now: number, isSure: boolean, made: number): Promise<unknown> => {
+  const day = dayOf(now)
+  // A day first counted here starts from the tasks kept that ended on it, as a session under way before the count was kept still has them.
+  const ended = (await read($, tasks)).filter(task => !isActive(task) && !isDemoTask(task) && task.endedAt !== undefined && dayOf(task.endedAt) === day)
+
+  return update($, today, was => {
+    // An end counted late, after a later day's were, leaves that day's count as it is; so does one begun before all was cleared.
+    if (made !== clears || dayRank(day) < dayRank(was.day)) return was
+    const base =
+      was.day === day
+        ? was
+        : {
+            day,
+            done: ended.filter(task => task.status !== 'failed').map(task => task.id),
+            failed: ended.filter(task => task.status === 'failed').map(task => task.id),
+            sure: ended.filter(task => task.isGuessed !== true).map(task => task.id),
+          }
+    const sure = base.sure ?? []
+
+    if (!isSure && sure.includes(id)) return base
+    const done = base.done.filter(one => one !== id)
+    const failed = base.failed.filter(one => one !== id)
+    const kept = isSure ? [...sure.filter(one => one !== id), id].slice(-TODAY_KEPT) : sure
+
+    return isFailed ? { day, done, failed: [...failed, id].slice(-TODAY_KEPT), sure: kept } : { day, done: [...done, id].slice(-TODAY_KEPT), failed, sure: kept }
+  })
+}
 const lang = atom({ plugin: 'chiikawa', key: 'lang' } as const, 'en')
 const langKept = atom({ plugin: 'chiikawa', key: 'langKept' } as const, {})
 const isLoaded = atom({ plugin: 'chiikawa', key: 'isLoaded' } as const, false)
@@ -191,7 +245,7 @@ const keepPictures = async ($: Engine): Promise<PicturesRead> => {
 
 /** What the drawings are made of. Every read of one dispatch is of one moment, so they are asked for together and not one after another. */
 const sceneOf = async ($: Engine): Promise<Scene> => {
-  const [spoke, list, now, wave, figures, lead, said, chosen, seen, lent, isOpen, back, isAlone, given, costs] = await Promise.all([
+  const [spoke, list, now, wave, figures, lead, said, chosen, seen, lent, isOpen, back, isAlone, given, costs, day] = await Promise.all([
     langOf($),
     tasksOf($),
     read($, clockNow),
@@ -207,9 +261,28 @@ const sceneOf = async ($: Engine): Promise<Scene> => {
     read($, isTalkOnly),
     read($, roles),
     read($, paid),
+    read($, today),
   ])
+  const isToday = day.day === dayOf(now)
 
-  return { lang: spoke, tasks: list, now, waveAt: wave, usage: figures, leaderTokens: lead, feed: said, picked: chosen, watched: seen, aids: lent, isUsageOpen: isOpen, talkBack: back, isTalkOnly: isAlone, roles: given, paid: costs }
+  return {
+    lang: spoke,
+    tasks: list,
+    now,
+    waveAt: wave,
+    usage: figures,
+    leaderTokens: lead,
+    feed: said,
+    picked: chosen,
+    watched: seen,
+    aids: lent,
+    isUsageOpen: isOpen,
+    talkBack: back,
+    isTalkOnly: isAlone,
+    roles: given,
+    paid: costs,
+    ...(isToday && day.done.length + day.failed.length > 0 ? { today: { done: day.done.length, failed: day.failed.length } } : {}),
+  }
 }
 
 /** The surface's elements with how the drawings look just now: the theme's tones, the frame of what moves. */
@@ -263,16 +336,32 @@ const settledLang = async ($: Engine, settings?: Settings): Promise<{ lang: Lang
  * it is told again beside the next prompt while it conducts, and told to stop
  * where it no longer does. Answers whether the language changed.
  */
-const refreshLook = async ($: Engine): Promise<boolean> => {
+/** How many times the settings were begun to be followed: only the last one begun writes what it read. */
+let looks = 0
+
+const refreshLook = async ($: Engine, isMine: () => boolean = () => true): Promise<boolean> => {
+  looks += 1
+  const made = looks
+  // Read late, after a newer read began or the load that asked was given up on, what it found is out of date: it writes nothing.
+  const isCurrent = (): boolean => made === looks && isMine()
   const settings = themeWanted !== 'auto' && langWanted !== 'auto' ? [] : await $.config.list().catch(() => [])
   const theme = themeWanted !== 'auto' ? themeWanted : settings.find(row => row.key === 'theme')?.value
   const isNowLight = typeof theme === 'string' && /light/i.test(theme)
 
-  if (isNowLight !== (await read($, isLight))) await update($, isLight, () => isNowLight)
+  if (!isCurrent()) return false
+  if (isNowLight !== (await read($, isLight))) await update($, isLight, was => (isCurrent() ? isNowLight : was))
   const { lang: next } = await settledLang($, settings)
 
-  if (next === (await read($, lang))) return false
-  await update($, lang, () => next)
+  if (!isCurrent() || next === (await read($, lang))) return false
+  const box = { isChanged: false }
+
+  await update($, lang, was => {
+    if (!isCurrent()) return was
+    box.isChanged = was !== next
+
+    return next
+  })
+  if (!box.isChanged) return false
   await update($, brief, told => ({ ...told, isStale: true, doubts: told.doubts + 1 }))
   $.ui.invalidate('prompt.section')
 
@@ -305,26 +394,60 @@ const isLive = (scene: Scene): boolean => {
   return scene.tasks.some(isActive) || (at > 0 && scene.now - at < LINGER_MS)
 }
 
-/** A line that work stands in: each piece starts once the one before it has ended, however that went. */
-const lineUp = (): (<T>(work: () => Promise<T>) => Promise<T>) => {
-  let last: Promise<unknown> = Promise.resolve()
+/** How long a piece of work may fairly take: one held past it by a call that never answers stops nothing after it. */
+const STUCK_MS = 60_000
 
-  return work => {
-    const mine = last.then(work, work)
+/** Resolves once `held` has been waited for as long as any work fairly takes, unless it ends first; never where no timer can be set. */
+const giveUp = ($: Engine, held: Promise<unknown>): Promise<void> =>
+  new Promise<void>(resolve => {
+    try {
+      const timer = $.clock.after(STUCK_MS, () => resolve())
 
-    last = mine.catch(() => undefined)
+      void held.then(
+        () => timer.cancel(),
+        () => timer.cancel(),
+      )
+    } catch {
+      // No timer: the line waits as it always did.
+    }
+  })
 
-    return mine
-  }
+/** Where each line stands: one thing at a time in each. */
+const lines: Record<'turn' | 'copy' | 'save', { done: Promise<unknown>; started: Promise<void> }> = {
+  turn: { done: Promise.resolve(), started: Promise.resolve() },
+  copy: { done: Promise.resolve(), started: Promise.resolve() },
+  save: { done: Promise.resolve(), started: Promise.resolve() },
 }
 
-// One thing happens at a time: taking a task or ending one reads the list,
-// writes it and speaks, and two doing so at once would talk over each other.
-const inTurn = lineUp()
-/** A spec's copies are made one at a time, so that two launches do not take one place for two texts. */
-const inCopy = lineUp()
-/** The roles and the languages are saved one at a time, so that the last save is of the last change. */
-const inSave = lineUp()
+/**
+ * A line that work stands in: each piece starts once the one before it has
+ * ended, however that went, or, in `turn` alone, has been stuck too long. In `turn`, taking a
+ * task or ending one reads the list, writes it and speaks, and two doing so at
+ * once would talk over each other; in `copy`, a spec's copies are made one at a
+ * time, so that two launches do not take one place for two texts; in `save`, the
+ * roles and the languages are saved one at a time, so that the last save is of
+ * the last change.
+ */
+const inLine = <T,>($: Engine, line: 'turn' | 'copy' | 'save', work: () => Promise<T>): Promise<T> => {
+  const before = lines[line]
+  // Only the turns are passed by when stuck, counted from when the one before began: those behind it still go one at a time. A save or a
+  // copy that ended late after one behind it would write over it.
+  const gate = line === 'turn' ? Promise.race([before.done, before.started.then(() => giveUp($, before.done))]) : before.done
+  const box: { begin?: () => void } = {}
+  const started = new Promise<void>(resolve => {
+    box.begin = resolve
+  })
+  const go = (): Promise<T> => {
+    box.begin?.()
+
+    return work()
+  }
+  const mine = gate.then(go, go)
+
+  lines[line] = { done: mine.catch(() => undefined), started }
+
+  return mine
+}
 
 /**
  * The characters say their lines, one after another: the conversation keeps
@@ -375,12 +498,13 @@ const kept = (list: readonly Task[]): Task[] => {
 }
 
 /**
- * Notes the agents whose records are let go while how they ended is still a
- * guess: the word of how each really went may yet come, and what it cost is
- * then still its character's. Only so many are listened for.
+ * Notes the agents whose records are let go: one whose end is still a guess
+ * may yet send word of how it really went, and one that ended may be sent on
+ * again; what each turn costs is still its character's. Only so many are
+ * listened for.
  */
 const owe = async ($: Engine, gone: readonly Task[]): Promise<void> => {
-  const late = gone.filter(task => task.kind === 'agent' && task.isGuessed === true).map(task => ({ id: task.id, member: task.member }))
+  const late = gone.filter(task => task.kind === 'agent').map(task => ({ id: task.id, member: task.member }))
 
   if (late.length > 0) await update($, owed, list => [...list.filter(one => !late.some(now => now.id === one.id)), ...late].slice(-OWED_KEPT))
 }
@@ -397,13 +521,16 @@ let isBusy = false
  * waited for is taken without its result file.
  */
 const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise<Task> =>
-  inTurn(async () => {
-    const now = await $.clock.now()
+  inLine($, 'turn', async () => {
     const given = await read($, roles)
+    // Taken after the roles are read, so that a read held long, and passed by in the line, starts its task when it truly does.
+    const now = await $.clock.now()
     const { out, staleAt: _staleAt, ...unread } = draft
-    const box: { task: Task; isWaveStart: boolean; busy: number; gone: Task[] } = {
+    const box: { task: Task; at: number; isWaveStart: boolean; isAlone: boolean; busy: number; gone: Task[] } = {
+      at: now,
       task: { ...draft, member: 'shisa', status: 'running', startedAt: now, toolCount: 0, quote: asIs(''), note: asIs(''), mood: 'calm' },
       isWaveStart: false,
+      isAlone: false,
       busy: 0,
       gone: [],
     }
@@ -415,14 +542,19 @@ const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise
       // takes the task, so that two launches taken at once do not both have it.
       const isShared = out !== undefined && list.some(task => task.id !== draft.id && task.kind === 'orca' && task.out === out && (isActive(task) || isDoubted(task, now)))
 
-      // A wave starts with nobody at work, demonstration or not: one started beside real work keeps that work's start, so it is counted whole.
-      box.isWaveStart = !list.some(isActive)
+      // Real work and a demonstration each start a wave of their own, with none of their kind at work: neither is counted in the other's.
+      box.isWaveStart = !list.some(task => isActive(task) && isDemoTask(task) === isDemoTask(draft))
+      // Taken late, as by a read held long while others went by, it starts where it is put among them: after the wave it did not
+      // belong to, or no earlier than the one it joins.
+      const same = list.filter(task => task.id !== draft.id && isDemoTask(task) === isDemoTask(draft))
+      box.at = box.isWaveStart ? Math.max(now, ...same.map(task => (task.endedAt ?? task.startedAt) + 1)) : Math.max(now, ...same.filter(isActive).map(task => task.startedAt))
+      box.isAlone = !list.some(isActive)
       box.busy = new Set([...list.filter(isActive).map(task => task.member), member]).size
       box.task = {
         ...(isShared ? unread : draft),
         member,
         status: 'running',
-        startedAt: now,
+        startedAt: box.at,
         toolCount: 0,
         quote: lineOf(member, 'start', turn),
         note: inAll(lang => WORDS[lang].started(CAST[lang].job[draft.role], titleOf(lang, draft))),
@@ -443,7 +575,10 @@ const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise
     const lines: Line[] = []
 
     if (box.isWaveStart) {
-      await update($, waveAt, () => now)
+      // What the drawings show as the wave in hand starts with real work, or with a demonstration begun alone; a demonstration begun beside real work leaves it.
+      // A wave starts no earlier than one begun after it: a task taken late does not take the newer wave back.
+      if (isDemoTask(task)) await update($, demoWaveAt, at => Math.max(at, box.at))
+      if (!isDemoTask(task) || box.isAlone) await update($, waveAt, at => Math.max(at, box.at))
       lines.push(['rodo', 'start', lineOf('rodo', 'start', 0), inAll(lang => WORDS[lang].bellNote)])
     }
     lines.push([task.member, 'start', task.quote, task.note])
@@ -477,7 +612,7 @@ const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise
 const sinceOf = (was: Aid | undefined, now: number): number => (was !== undefined && now - was.at < AID_MS ? (was.since ?? was.at) : now)
 
 const lend = ($: Engine, tool: string, detail: string): Promise<void> =>
-  inTurn(async () => {
+  inLine($, 'turn', async () => {
     const now = await $.clock.now()
     const wanted: MemberId | undefined = SEEK.has(tool) ? 'usagi' : MEND.has(tool) ? 'chiikawa' : undefined
     const helper = wanted !== undefined && !(await read($, tasks)).some(task => task.member === wanted && isActive(task)) ? wanted : undefined
@@ -577,7 +712,9 @@ const endOf = (task: Task, outcome: Outcome, now: number): Task => {
  * and says nothing of them: no line, and no toast.
  */
 const settle = ($: Engine, id: string, outcome: Outcome): Promise<void> =>
-  inTurn(async () => {
+  inLine($, 'turn', async () => {
+    // Cleared while it is settled, it is counted in no day.
+    const made = clears
     const now = await $.clock.now()
     const box: { ended?: Task; all: Task[]; gain?: readonly [MemberId, Tokens] } = { all: [] }
 
@@ -612,6 +749,7 @@ const settle = ($: Engine, id: string, outcome: Outcome): Promise<void> =>
 
     const { ended } = box
 
+    if (ended !== undefined && !isActive(ended) && !isDemoTask(ended)) await countEnd($, ended.id, ended.status === 'failed', now, ended.isGuessed !== true, made).catch(() => undefined)
     if (ended === undefined || !(await read($, isOn))) return
     // A toast is read once and gone: it is in the language of the moment.
     const spoke = await langOf($)
@@ -625,9 +763,12 @@ const settle = ($: Engine, id: string, outcome: Outcome): Promise<void> =>
     // A demonstration and real work are each a wave of their own: a pretend failure is not told as one of the real work.
     const isSame = (task: Task): boolean => isDemoTask(task) === isDemoTask(ended)
 
-    if (!box.all.some(task => isSame(task) && isActive(task))) {
-      const since = await read($, waveAt)
-      const wave = box.all.filter(task => isSame(task) && task.startedAt >= since)
+    // The list as it is now: work taken while this end was held up is not missed.
+    const current = await read($, tasks)
+
+    if (!current.some(task => isSame(task) && isActive(task))) {
+      const since = isDemoTask(ended) ? await read($, demoWaveAt) : await read($, waveAt)
+      const wave = current.filter(task => isSame(task) && task.startedAt >= since)
       const failed = wave.filter(task => task.status === 'failed').length
       const quote = inAll(lang => (failed > 0 ? CAST[lang].leader.cheer : wave.length >= 2 ? CAST[lang].leader.sweep : CAST[lang].leader.allDone))
       const note = inAll(lang => (failed > 0 ? WORDS[lang].waveFailed(wave.length, failed) : WORDS[lang].waveDone(wave.length)))
@@ -654,6 +795,12 @@ const isRowOf = (description: string, task: Pick<Task, 'member' | 'title'>): boo
 const asking = new Set<string>()
 /** Ends that came before their task had its id, oldest first, each with the turn it is of: they wait for the task the id is given to. */
 const early = new Map<string, { turn: string; outcome: Outcome }[]>()
+/** The turns already heard of each agent, the last few of the last agents: one told again is not paid again. */
+const heard = new Map<string, string[]>()
+/** The turns being taken now, each as its agent and turn. */
+const hearing = new Map<string, number>()
+const HEARD_KEPT = 20
+const HEARD_AGENTS = 100
 
 /** Ends the task an id was just given to, where word of its turns' ends came before the id did: each in the order it came. */
 const catchUp = async ($: Engine, agentId: string): Promise<void> => {
@@ -718,6 +865,30 @@ const adopt = async ($: Engine, agentId: string): Promise<void> => {
  * character's.
  */
 const finish = async ($: Engine, agentId: string, turn: string, outcome: Outcome): Promise<void> => {
+  const key = `${agentId}\n${turn}`
+
+  const now = await $.clock.now().catch(() => 0)
+  const since = hearing.get(key)
+
+  // The same turn told twice is paid once: told again while it is taken, or after, it is passed by. One whose taking failed, or has hung
+  // past what any fairly takes, may be told again.
+  if ((heard.get(agentId) ?? []).includes(turn) || (since !== undefined && now - since < STUCK_MS)) return
+  hearing.set(key, now)
+  try {
+    await finishTurn($, agentId, turn, outcome)
+    const told = heard.get(agentId) ?? []
+
+    heard.delete(agentId)
+    heard.set(agentId, [...told, turn].slice(-HEARD_KEPT))
+    for (const id of [...heard.keys()].slice(0, Math.max(0, heard.size - HEARD_AGENTS))) heard.delete(id)
+  } finally {
+    if (hearing.get(key) === now) hearing.delete(key)
+  }
+}
+
+const finishTurn = async ($: Engine, agentId: string, turn: string, outcome: Outcome): Promise<void> => {
+  const made = clears
+
   await adopt($, agentId)
   const list = await read($, tasks)
 
@@ -726,6 +897,8 @@ const finish = async ($: Engine, agentId: string, turn: string, outcome: Outcome
 
   if (member !== undefined) {
     await update($, paid, was => ({ ...was, [member]: plus(was[member] ?? ZERO, outcome.tokens) }))
+    // How it really went is counted in the day's work, over the guess the record was let go on.
+    if (outcome.isGuessed !== true) await countEnd($, agentId, !outcome.isOk, await $.clock.now(), true, made).catch(() => undefined)
 
     return
   }
@@ -816,7 +989,7 @@ const pollWorker = async ($: Engine, task: Task): Promise<void> => {
  * launch runs on the spec as it was written, without the voice.
  */
 const voiceSpec = ($: Engine, spec: string, text: string, task: Task): Promise<string | undefined> =>
-  inCopy(async () => {
+  inLine($, 'copy', async () => {
     const copy = text + orcaBlock(await langOf($), task.member, task.role)
 
     for (let turn = 1; turn <= COPIES; turn += 1) {
@@ -843,7 +1016,7 @@ const voiceSpec = ($: Engine, spec: string, text: string, task: Task): Promise<s
  * worker with no result, or a subagent never told apart from the others.
  */
 const letGo = ($: Engine, id: string, now: number, why: (words: Words) => (name: string, title: string) => string): Promise<void> =>
-  inTurn(async () => {
+  inLine($, 'turn', async () => {
     const box: { gone?: Task } = {}
 
     await update($, tasks, list => {
@@ -956,12 +1129,19 @@ const nudge = async ($: Engine, id: string, now: number): Promise<void> => {
   await tell($, now, lines)
 }
 
-let isTicking = false
+/** The beat under way: when it began, and which it is. One held past `STUCK_MS` by a call that never answers is passed by. */
+let ticking: { at: number; id: number } | undefined
+let ticks = 0
 
 /** One beat: asks after every character at work, and moves the clock the drawings read. */
 const tick = async ($: Engine): Promise<void> => {
-  if (isTicking) return
-  isTicking = true
+  const begun = await $.clock.now()
+
+  if (ticking !== undefined && begun - ticking.at < STUCK_MS) return
+  ticks += 1
+  const mine = ticks
+
+  ticking = { at: begun, id: mine }
   try {
     // A session begun by a `/clear` is given what is kept here, where nothing was asked of the mode yet: a drawing may not write.
     await ensure($).catch(() => undefined)
@@ -1009,7 +1189,7 @@ const tick = async ($: Engine): Promise<void> => {
     await refreshUsage($).catch(() => undefined)
     await stamp($, now)
   } finally {
-    isTicking = false
+    if (ticking?.id === mine) ticking = undefined
   }
 }
 
@@ -1060,7 +1240,7 @@ const edits = { lang: 0, roles: 0 }
  * kept may hold more than the session knows of.
  */
 const keep = ($: Engine): Promise<boolean> =>
-  inSave(async () => {
+  inLine($, 'save', async () => {
     const box = { isRead: false }
 
     // Whether they were read may have been written by another hook's read, since this one began: what stands now is what an update is handed.
@@ -1202,7 +1382,7 @@ const DEMO: readonly (readonly [Role, MemberId, number, boolean])[] = [
  * read into this session are not saved over.
  */
 const keepLang = ($: Engine): Promise<boolean> =>
-  inSave(async () => {
+  inLine($, 'save', async () => {
     const box = { isRead: false }
 
     await update($, isLangRead, stands => (box.isRead = stands))
@@ -1276,30 +1456,37 @@ let mover: Timer | undefined
  * whether the pane is up, the usage. What the person changed while it was
  * being read is the newer, and is left as they made it.
  */
-const load = async ($: Engine): Promise<void> => {
+const load = async ($: Engine, made: number): Promise<void> => {
   const { lang: spokenEdits, roles: roleEdits } = edits
+  // A read begun anew after this one was given up on is the one that writes: this one, ending late, writes nothing.
+  const isMine = (): boolean => made === loads
   // The language chosen or typed in an earlier session is the language from the first screen on. Where it cannot be read, it stays as it is.
   const spoken = await $.store.get(LANG_KEPT).then(langKeptFrom, () => undefined)
 
   // Only what was read in counts as read: what the session does not hold of what is kept, it must not save over.
+  if (!isMine()) return
   if (spoken !== undefined && edits.lang === spokenEdits) {
-    await update($, langKept, () => spoken)
-    await update($, isLangRead, () => true)
+    await update($, langKept, was => (isMine() ? spoken : was))
+    await update($, isLangRead, was => isMine() || was)
   }
-  await refreshLook($).catch(() => false)
+  if (!isMine()) return
+  await refreshLook($, isMine).catch(() => false)
+  if (!isMine()) return
   await enlist($)
   // The roles the person gave in an earlier session are the roles still. Where they cannot be read, the roles stay as they are.
   const kept = await $.store.get(ROLES_KEPT).then(rolesFrom, () => undefined)
 
+  if (!isMine()) return
   if (kept !== undefined && edits.roles === roleEdits) {
     const box = { isChanged: false }
 
     await update($, roles, was => {
+      if (!isMine()) return was
       box.isChanged = WORKERS.some(id => was[id] !== kept[id])
 
       return kept
     })
-    await update($, isRolesRead, () => true)
+    await update($, isRolesRead, was => isMine() || was)
     // Read in a session under way, as on a reload, roles other than the ones in use are news to the main loop.
     if (box.isChanged) await update($, roleVersion, version => version + 1)
   }
@@ -1309,19 +1496,38 @@ const load = async ($: Engine): Promise<void> => {
     () => false,
   )
 
-  await update($, isPaneOpen, () => isUp)
+  if (!isMine()) return
+  await update($, isPaneOpen, was => (isMine() ? isUp : was))
+  if (!isMine()) return
   await refreshUsage($).catch(() => undefined)
-  await update($, isLoaded, () => true)
+  await update($, isLoaded, was => isMine() || was)
 }
 
 /** The read under way, so that a session starting and the hooks arriving with it share one. */
 let loading: Promise<void> | undefined
+/** How many reads were begun: only the last writes what it read. */
+let loads = 0
 
 /** Reads what is kept over sessions into this one, or waits for the read under way. */
-const reload = ($: Engine): Promise<void> =>
-  (loading ??= load($).finally(() => {
-    loading = undefined
-  }))
+const reload = ($: Engine): Promise<void> => {
+  if (loading === undefined) {
+    loads += 1
+    const mine: Promise<void> = load($, loads).finally(() => {
+      if (loading === mine) loading = undefined
+    })
+
+    loading = mine
+  }
+  const held = loading
+
+  // A read held past what any fairly takes is not waited for again: the next one starts anew.
+  return Promise.race([
+    held,
+    giveUp($, held).then(() => {
+      if (loading === held) loading = undefined
+    }),
+  ])
+}
 
 /** Has this session hold what is kept over sessions: a `/clear` starts one with none of it, and no `session.start` fires for it. */
 /** A command's kind of work, by what it runs: tests and checks are looked over, searches find, the rest is built. */
@@ -1473,10 +1679,15 @@ export const register: Register = (on, options) => {
       const isAll = asked === 'clear all'
       const box: { gone: Task[] } = { gone: [] }
 
-      await update($, tasks, list => {
-        box.gone = isAll ? [] : list.filter(task => !isActive(task))
+      // Without the time, no worker is still looked for.
+      const now = await $.clock.now().catch(() => Number.POSITIVE_INFINITY)
+      // A worker whose end is still being looked for stays: its result, and what it cost, may yet come.
+      const stays = (task: Task): boolean => isActive(task) || isDoubted(task, now)
 
-        return isAll ? [] : list.filter(isActive)
+      await update($, tasks, list => {
+        box.gone = isAll ? [] : list.filter(task => !stays(task))
+
+        return isAll ? [] : list.filter(stays)
       })
       await update($, feed, () => [])
       await update($, watched, () => null)
@@ -1485,8 +1696,11 @@ export const register: Register = (on, options) => {
       if (isAll) {
         unlisted.clear()
         early.clear()
+        heard.clear()
         await update($, paid, () => ({}))
         await update($, owed, () => [])
+        clears += 1
+        await update($, today, () => ({ day: '', done: [], failed: [] }))
         await update($, leaderTokens, () => ZERO)
       } else await owe($, box.gone)
 
@@ -1743,7 +1957,9 @@ export const register: Register = (on, options) => {
       const home = await $.env.get('HOME').catch(() => undefined)
       // Any change of folder in the command, in any quoting: a path not from the root is then not read where the command reads it.
       // Only where a command stands, after a separator or opening a script given to a shell: `echo 'cd'` moves nothing.
-      const isMoved = /(?:^|[;&|(){}\n!]|\b(?:then|do|else|time|exec|command|builtin)\s|(?:\s-c|--command)[\s=]+['"]?)\s*(?:cd|pushd|popd|chdir)(?=$|[\s;&|)])/.test(command)
+      const isMoved = /(?:^|[;&|(){}\n!]|\b(?:if|then|do|else|elif|while|until|time|exec|command|builtin)\s|(?:\s-[A-Za-z]*c|--command)[\s=]+['"]?)\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:cd|pushd|popd|chdir)(?=$|[\s;&|)])/.test(command) ||
+        // An Orca terminal opened at a worktree starts there, not where this session reads.
+        /\borca\s+terminal\s+create\b[^\n]*\s--worktree\b/.test(command)
       const usable = (path: string | undefined): string | undefined =>
         path === undefined || (isMoved && !path.startsWith('/')) ? undefined : path
       const made: { task: Task; run: FleetRun; voiced?: string; isShared: boolean; isUncopied: boolean }[] = []
@@ -1795,6 +2011,11 @@ export const register: Register = (on, options) => {
         // With no result file to read its end from: one another worker has, or one whose path could not be read.
         const unread = task.out !== undefined ? undefined : isShared ? (words: Words) => words.sharedOut : run.hasOut ? (words: Words) => words.unseen : undefined
 
+        // Turned away by fleet-run itself: no worker starts and nothing is written, so it ends now.
+        if (run.isRefused === true) {
+          await settle($, task.id, { isOk: false, why: words => (run.isLacking === true ? words.turnedAway : words.turnedAwayOdd) }).catch(() => undefined)
+          continue
+        }
         if (task.out !== undefined) await pollWorker($, task).catch(() => undefined)
         // A launch that answered an error has failed. Handed on, its worker may be running all the same: that end is a guess, and the result is still looked for.
         if (isFailed) await settle($, task.id, isAway ? { isOk: false, why: words => words.launchFailed, isGuessed: true } : { isOk: false }).catch(() => undefined)

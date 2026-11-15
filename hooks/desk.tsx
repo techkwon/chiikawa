@@ -11,7 +11,7 @@ import type { Lang, MemberId, Said } from '../types'
 
 import { CAST, CORE, isGesture, jobOf, LEAD, MEMBERS, ORDER, PINK, roleOf, shortName, shown, WORK_ROLES, WORKERS } from './cast'
 import type { Band, Card, PaneActs, Scene, Sheet } from './view'
-import { aidOf, bar, busyOf, MARK, cardOf, taskShown, gaugeParts, GUESTS, hasRole, lastSaid, metersOf, onStage, seatOf, sheetOf, shownOf, spendersOf, spent, spentBy, waitingOf, waitingSaid } from './view'
+import { aidOf, bar, busyOf, MARK, cardOf, taskShown, gaugeParts, GUESTS, hasRole, lastSaid, metersOf, onStage, seatOf, sheetOf, shownOf, quietSaid, spendersOf, spent, spentBy, waitingOf } from './view'
 import type { PictureState } from './pictures'
 import { bandPictureOf, pictureOf } from './pictures'
 import { WORDS } from './words'
@@ -359,7 +359,7 @@ const Talk = (kit: DeskKit, scene: Scene, count: number, acts: PaneActs): Render
   const total = scene.feed.length
   const back = total - to
   const size = Math.max(1, count)
-  const said = total === 0 ? [waitingSaid] : scene.feed.slice(from, to)
+  const said = total === 0 ? [quietSaid(scene)] : scene.feed.slice(from, to)
   // The newest lines take the pictures first: the oldest are the ones left with an emoji.
   const faces = said.map(() => undefined as string | undefined)
 

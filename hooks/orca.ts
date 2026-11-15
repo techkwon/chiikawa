@@ -32,6 +32,10 @@ export type FleetRun = {
   isBackground: boolean
   /** It is handed to something that answers at once, an Orca terminal or `nohup`: the command does not wait for it either. */
   isDetached: boolean
+  /** fleet-run turns it away before any worker starts, an option it needs missing or one it does not know: it leaves no result to wait for. */
+  isRefused?: true
+  /** Whether it is turned away for lacking one of the three paths it needs. */
+  isLacking?: true
 }
 
 /**
@@ -41,7 +45,7 @@ export type FleetRun = {
  */
 type Piece = { text: string; quote: '' | '"' | "'" | '('; from: number; to: number }
 /** A word of a command, and its place with its quotes. One that runs into a `<` with no space between is cut: what it comes to is not told. */
-type Word = { pieces: Piece[]; from: number; to: number; isCut?: boolean }
+type Word = { pieces: Piece[]; from: number; to: number; isCut?: boolean; isInside?: true }
 /** One command of a script: its words, and the operators it stands between. One that is odd holds something not read here as the shell reads it. */
 type Statement = { words: Word[]; before: string; after: string; isOdd: boolean }
 /** What the variables assigned so far are sure to hold. */
@@ -58,6 +62,8 @@ type Shell = {
   isWhole: boolean
   /** Nothing is sure from here on: something was met that this does not follow. */
   isLost: boolean
+  /** How many more statements loops may be read over again for, in the whole command: shared by every shell it starts. */
+  budget: { left: number }
 }
 
 /** A path that goes into a command as it is, with nothing for a shell to read into it: letters and digits of any script, and the few signs a path is written with. */
@@ -119,6 +125,32 @@ const KEYWORDS = new Map<string, number>([
   ['time', 0],
 ])
 const LOOPS = new Set(['while', 'until', 'for', 'select'])
+/** The Python interpreters fleet-run may be run by. */
+const PYTHONS = /^python(?:3(?:\.\d+)?)?$/
+
+/** Where the file an interpreter runs is named among its arguments: none where it runs code given to it (`-c`), a module (`-m`), or what it reads in. */
+const scriptAt = (args: readonly Word[]): number => {
+  for (let at = 0; at < args.length; at += 1) {
+    const text = literalOf(args[at])
+
+    if (text === undefined || text === '-') return -1
+    if (!text.startsWith('-')) return at
+    if (text === '--') return at + 1 < args.length ? at + 1 : -1
+    // A long option, `--version` and `--help` among them, is not followed: what it does to the file named after it is not sure.
+    if (text.startsWith('--')) return -1
+    // Short options run together end in the one that takes a value: `-uc` is `-u -c`, and `-Xdev` is `-X dev`, the rest of the word
+    // its value, or the next word where nothing is left. Help and the version end it before any file.
+    const flags = text.slice(1)
+    const valued = flags.search(/[WX]/)
+    const own = valued < 0 ? flags : flags.slice(0, valued)
+
+    // Only the options Python knows run the file: any other, as `-z`, stops it, and so do code, a module, help and the version.
+    if (!/^[bBdEiIOPqsSuvx]*$/.test(own)) return -1
+    if (valued >= 0 && valued === flags.length - 1) at += 1
+  }
+
+  return -1
+}
 /** Commands that run the command named after them. */
 const WRAPPERS = new Set(['nohup', 'exec', 'command', 'env'])
 /** Commands whose arguments assign, where the shell has them: only where they stand alone, with no option, is no more than that done. */
@@ -487,27 +519,194 @@ const valueOf = (args: readonly Word[], name: string): { word: Word; isApart: bo
 
 const baseName = (path: string): string => path.slice(path.lastIndexOf('/') + 1)
 
-/** The launch a `fleet-run`'s arguments make, its paths as far as they are sure; none where no profile is named. */
+/** A path with its `.` and doubled slashes read away: two ways of writing one file are one. */
+export const tidyPath = (path: string): string => {
+  const isRoot = path.startsWith('/')
+  const parts: string[] = []
+
+  for (const part of path.split('/')) {
+    // A `..` after a link leads where the link's target is: it is kept as written.
+    if (part !== '' && part !== '.') parts.push(part)
+  }
+
+  const joined = parts.join('/')
+
+  return isRoot ? `/${joined}` : joined === '' ? '.' : joined
+}
+
+/** Whether the shell may part a word into several: something is filled in where no quotes hold it. */
+const isSplit = (word: Word): boolean => word.pieces.some(piece => piece.quote === '(' || (piece.quote === '' && /[$`]/.test(piece.text)) || isUnknown(piece.text))
+
+/** Whether argparse takes a word as an option rather than as a value: a dash before it, unless it is one alone, a negative number or holds a space. */
+const isOptionLike = (text: string): boolean => text.startsWith('-') && text !== '-' && !/^-(?:\d+|\d*\.\d+)$/.test(text) && !text.includes(' ')
+
+/** Whether text holds a place a script handed on fills with what is not known here: it may come to nothing, or to several words. */
+const isUnknown = (text: string): boolean => text.includes('\0')
+
+/** The text a word opens with as written, up to the first piece the shell fills in. */
+const leadOf = (word: Word): string => {
+  const filled = word.pieces.findIndex(piece => piece.quote === '(' || (piece.quote !== "'" && /[$`\\]/.test(piece.text)))
+  const piece = word.pieces[filled]
+  // The piece that is filled in is read up to where its filling begins.
+  const part = piece === undefined || piece.quote === '(' ? '' : piece.text.slice(0, piece.text.search(/[$`\\]/))
+
+  return (filled < 0 ? word.pieces : word.pieces.slice(0, filled)).map(one => one.text).join('') + part
+}
+
+/** A word less its first characters, across as many of its pieces as they take. */
+const after = (word: Word, skip: number): Word => {
+  const pieces = [...word.pieces]
+  let left = skip
+
+  while (pieces.length > 0 && left >= (pieces[0]?.text.length ?? 0)) {
+    left -= pieces[0]?.text.length ?? 0
+    pieces.shift()
+  }
+  const [first, ...more] = pieces
+
+  if (first === undefined) return { ...word, pieces: [], from: word.to }
+  const head = { ...first, text: first.text.slice(left), from: first.from + left }
+  // A word that starts at its quotes starts at the quote itself; one that starts inside them, with more after, has no place of its own to be written over.
+  // A piece in quotes has its place inside them; a character escaped with `\\` has its own at the backslash, which it then starts at.
+  const isQuoted = (first.quote === '"' || first.quote === "'") && first.to - first.from === first.text.length
+  const from = isQuoted && left === 0 ? first.from - 1 : head.from
+  const isInside = left > 0 && first.quote !== '' && more.length > 0
+
+  return { ...word, pieces: head.text === '' ? more : [head, ...more], from, ...(isInside ? { isInside: true as const } : {}) }
+}
+
+/** fleet-run's own options, each with whether it takes a value: its argparse also takes any start of a long one that names it alone. */
+const FLEET_OPTIONS: Readonly<Record<string, boolean>> = { cwd: true, spec: true, out: true, 'timeout-min': true, browser: false, 'no-browser': false, 'dry-run': false, help: false }
+
+const optionOf = (typed: string): string | undefined => {
+  if (typed === '-h') return 'help'
+  if (!typed.startsWith('--') || typed.length < 3) return undefined
+  const name = typed.slice(2)
+
+  if (Object.hasOwn(FLEET_OPTIONS, name)) return name
+  const named = Object.keys(FLEET_OPTIONS).filter(one => one.startsWith(name))
+
+  return named.length === 1 ? named[0] : undefined
+}
+
+/** A `fleet-run`'s arguments as its argparse reads them: the profile wherever it stands, each option's values, and whether it is turned away. */
+const fleetArgsOf = (args: readonly Word[]): { profile?: Word; values: Map<string, { word: Word; isApart: boolean }[]>; flags: Set<string>; isRefused: boolean; isUnsure: boolean } => {
+  const values = new Map<string, { word: Word; isApart: boolean }[]>()
+  const flags = new Set<string>()
+  const give = (name: string, word: Word, isApart: boolean): void => {
+    values.set(name, [...(values.get(name) ?? []), { word, isApart }])
+  }
+  let profile: Word | undefined
+  let isRefused = false
+  // A word the shell fills in may come to nothing, or to options: what it is turned away for is then not sure.
+  let isUnsure = false
+  let isPast = false
+
+  for (let index = 0; index < args.length; index += 1) {
+    const word = args[index]
+
+    if (word === undefined) continue
+    // An option's own name stands at the word's start, bare or in quotes, in one piece or several: what it is given after `=` may be filled in.
+    const head = leadOf(word)
+    const equals = head.startsWith('--') ? head.indexOf('=') : -1
+    const known = equals > 0 ? head : literalOf(word)
+    // What is filled in after `=` is the option's value: its name is still known.
+    const text = known === undefined || isUnknown(equals > 0 ? known.slice(0, equals) : known) ? undefined : known
+
+    if (text === undefined) {
+      if (profile === undefined) profile = word
+      else isUnsure = true
+      continue
+    }
+    // After `--` every word is one the program is handed as it is.
+    if (!isPast && text === '--') {
+      isPast = true
+      continue
+    }
+    if (isPast || !text.startsWith('-') || text === '-') {
+      // One word the profile, and any other one more than it takes.
+      if (profile === undefined) profile = word
+      else isRefused = true
+      continue
+    }
+    const name = optionOf(equals > 0 ? text.slice(0, equals) : text)
+
+    if (name === undefined) {
+      isRefused = true
+      continue
+    }
+    if (FLEET_OPTIONS[name] !== true) {
+      if (equals > 0) isRefused = true
+      flags.add(name)
+    } else if (equals > 0) {
+      const value = after(word, equals + 1)
+
+      if (isSplit(value)) isUnsure = true
+      give(name, value, false)
+    } else {
+      const next = args[index + 1]
+      const nextText = literalOf(next)
+
+      // A word that looks like an option is not taken as a value: argparse says the option has none.
+      if (next === undefined || (nextText !== undefined && isOptionLike(nextText))) {
+        isRefused = true
+        continue
+      } else {
+        // A value the shell fills in bare may part into several words, the options it lacks among them.
+        if (isSplit(next)) isUnsure = true
+        give(name, next, true)
+      }
+      index += 1
+    }
+  }
+
+  return { ...(profile === undefined ? {} : { profile }), values, flags, isRefused, isUnsure }
+}
+
+/** The launch a `fleet-run`'s arguments make, its paths as far as they are sure; none where no profile is named, or where it only shows or tries. */
 const runOf = (args: readonly Word[], shell: Shell, isBackground: boolean, isDetached: boolean): FleetRun | undefined => {
-  const profile = literalOf(args[0])
+  const read = fleetArgsOf(args)
+  const profile = literalOf(read.profile)
 
   if (profile === undefined || !/^[a-z]+-[a-z]+$/.test(profile)) return undefined
-  const given = valueOf(args, 'spec')
-  const kept = valueOf(args, 'out')
+  // Help, or a dry run, starts no worker at all.
+  if (read.flags.has('help') || read.flags.has('dry-run')) return undefined
+  // An option given twice is taken at its last by argparse, yet which of them the shell keeps is not sure here: none is read.
+  const once = (name: string): { word: Word; isApart: boolean } | undefined => {
+    const all = read.values.get(name) ?? []
+
+    return all.length === 1 ? all[0] : undefined
+  }
+  const given = once('spec')
+  const kept = once('out')
   // A `~` after `--spec=` is not the home directory: only one that opens a word is.
   const spec = given === undefined ? undefined : resolve(given.word, shell, given.isApart)
   const out = kept === undefined ? undefined : resolve(kept.word, shell, kept.isApart)
   const named = baseName(spec ?? out ?? '').replace(/\.(?:spec|out)\.md$|\.md$/, '')
-  const run: FleetRun = { profile, title: named === '' ? profile : named, hasOut: kept !== undefined, isBackground, isDetached }
+  const run: FleetRun = { profile, title: named === '' ? profile : named, hasOut: read.values.has('out'), isBackground, isDetached }
+  // Without all three of its paths, or with words it does not know, fleet-run stops at once. A profile this mode does not know may be the person's own: it is run.
+  // A path given empty is none: fleet-run asks for each to be something. Given twice, the last one counts.
+  const isLacking = !['cwd', 'spec', 'out'].every(name => {
+    const all = read.values.get(name) ?? []
 
-  if (given !== undefined && spec !== undefined) {
+    // Written empty, in quotes or after `=`: every piece of it holds nothing.
+    return all.length > 0 && !(all[all.length - 1]?.word.pieces ?? []).every(piece => piece.text === '')
+  })
+
+  if (!read.isUnsure && (read.isRefused || isLacking)) {
+    run.isRefused = true
+    // argparse turns away a word it does not take first: the paths are looked at only after it has read them all.
+    if (!read.isRefused) run.isLacking = true
+  }
+
+  if (given !== undefined && spec !== undefined && given.word.isInside !== true) {
     const [piece, ...more] = given.word.pieces
 
     run.spec = spec
     // One piece is written over inside its quotes; a word of several, quotes and all.
     run.specSpan = piece !== undefined && more.length === 0 ? [piece.from, piece.to] : [given.word.from, given.word.to]
   }
-  if (out !== undefined) run.out = out
+  if (out !== undefined) run.out = tidyPath(out)
 
   return run
 }
@@ -674,6 +873,49 @@ const affect = (word: Word | undefined, args: readonly Word[], shell: Shell, isR
   if (!isWritten) shell.isWhole = false
 }
 
+/** Words that leave a loop, or a round of it, or the shell, early: `exec` hands the shell over to what it runs. */
+const LEAVES = new Set(['break', 'continue', 'exit', 'return', 'exec'])
+/** How many statements loops are read over again for in one command, all told: past it, a loop is read once, as any other. */
+const LOOP_BUDGET = 400
+/** How many times a loop is read over at most: one going through more is read once, as any other loop. */
+const LOOP_ITEMS = 20
+
+/**
+ * A `for` loop that goes through words written out: its variable, the words,
+ * and the statement its `done` stands in. None where what it goes through is
+ * filled in or matched by the shell, or where it does not close.
+ */
+const loopOf = (statements: readonly Statement[], index: number): { name: string; items: string[]; end: number } | undefined => {
+  const said = statements[index]?.words ?? []
+  // A loop may open a block's body: `do for …`, `then for …`.
+  const opens = said.findIndex(word => !['do', 'then', 'else'].includes(bareOf(word) ?? ''))
+  const words = opens < 0 ? [] : said.slice(opens)
+  const name = bareOf(words[1])
+
+  // A variable the shell keeps for itself, as `RANDOM` or `SECONDS`, does not hold what it is given.
+  if (bareOf(words[0]) !== 'for' || name === undefined || !/^[A-Za-z_]\w*$/.test(name) || RULING.has(name) || SPECIAL.test(name) || bareOf(words[2]) !== 'in') return undefined
+  // A word the shell matches against files, or opens with a bare `~` for a home directory or, in zsh, a bare `=` for a program's path, is not the word written.
+  const items = words.slice(3).map(word => (word.pieces.some(piece => piece.quote === '' && /[*?[{]/.test(piece.text)) || (word.pieces[0]?.quote === '' && /^[~=]/.test(word.pieces[0].text)) || isUnknown(literalOf(word) ?? '') ? undefined : literalOf(word)))
+
+  if (items.length === 0 || items.length > LOOP_ITEMS || items.some(item => item === undefined)) return undefined
+  let depth = 1
+
+  for (let at = index + 1; at < statements.length; at += 1) {
+    const next = statements[at]?.words ?? []
+
+    for (let key = 0; key < next.length && KEYWORDS.has(bareOf(next[key]) ?? ''); key += 1) {
+      depth += KEYWORDS.get(bareOf(next[key]) ?? '') ?? 0
+      if (depth !== 0) continue
+      // A body that may leave the loop, or a round of it, early does not run once for each word.
+      const isCut = statements.slice(index + 1, at).some(one => one.words.some(word => LEAVES.has(word.pieces.map(piece => (piece.quote === '' ? piece.text.replace(/\\/g, '') : piece.text)).join(''))))
+
+      return isCut ? undefined : { name, items: items.filter(item => item !== undefined), end: at }
+    }
+  }
+
+  return undefined
+}
+
 /**
  * The launches a list of statements makes, in the order written, with what
  * is sure of the shell kept as each statement is passed. `home` is the home
@@ -687,8 +929,44 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
   let body: 'due' | number | undefined
   /** Whether a `[[` is open: what stands up to its `]]` is a test's words, and no command. */
   let isTesting = false
+  /** The statements already read, a loop's body once for each word it goes through. */
+  let skip = 0
 
   for (const [index, { words, before, after, isOdd }] of statements.entries()) {
+    if (index < skip) continue
+    const found = typeof body !== 'number' && !isTesting && !isOdd ? loopOf(statements, index) : undefined
+    // Each round is the body's statements read once more, out of what the whole command may have read.
+    const cost = found === undefined ? 0 : found.items.length * (found.end - index)
+    const loop = found !== undefined && !shell.sealed.has(found.name) && !shell.isLost && cost <= shell.budget.left ? found : undefined
+
+    if (loop !== undefined) shell.budget.left -= cost
+
+    if (loop !== undefined) {
+      // Each time round, the variable holds the next word, and nothing else known before is sure. Each launch is one of its own, and none
+      // has one place in the command where a copy of its spec could be written for it alone.
+      // Each round goes on from what the one before left, the variable holding the next word.
+      const inner: Shell = { ...shell, vars: new Map(shell.vars), sealed: new Set(shell.sealed) }
+
+      for (const item of loop.items) {
+        if (inner.sealed.has(loop.name)) lose(inner)
+        else inner.vars.set(loop.name, item)
+        for (const { specSpan: _span, ...run } of scan(statements.slice(index + 1, loop.end), inner, home)) runs.push(run)
+        // A round that ran what is not known, as a variable that may hold `break`, may have left the loop: no round after it is sure.
+        if (inner.isLost) break
+      }
+      // After it, what the rounds made unsure stays so, and nothing they assigned is sure.
+      shell.isLost ||= inner.isLost
+      shell.isWhole &&= inner.isWhole
+      for (const name of inner.sealed) shell.sealed.add(name)
+      forget(shell)
+      skip = loop.end + 1
+      // The loop's first line and its `done` may each open or close a shell of their own around it.
+      for (const edge of [after, statements[loop.end]?.after]) {
+        if (edge === '(') parens += 1
+        else if (edge === ')') parens = Math.max(0, parens - 1)
+      }
+      continue
+    }
     const defined = definedAt(statements, index)
     let at = defined ?? 0
     let isTimed = false
@@ -753,16 +1031,19 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
 
         // A variable a shell is ruled by, given to a command, rules the shell that command starts.
         if (lent.some(one => RULING.has(one))) lose(shell)
-        const run = name === 'fleet-run' ? runOf(args, shell, after === '&', isDetached) : undefined
+        // fleet-run is a Python script: it may be run by its interpreter, given its path.
+        const script = PYTHONS.test(name ?? '') ? scriptAt(args) : -1
+        const isScripted = script >= 0 && nameOf(args[script]) === 'fleet-run'
+        const run = name === 'fleet-run' || isScripted ? runOf(isScripted ? args.slice(script + 1) : args, shell, after === '&', isDetached) : undefined
         const handed = run === undefined ? handedOf(name, args) : undefined
-        const script = handed === undefined ? undefined : scriptOf(handed.word, shell)
+        const text = handed === undefined ? undefined : scriptOf(handed.word, shell)
 
         if (run !== undefined) runs.push(run)
         // The shell a script is handed to has this one's home directory only while this one has the one it began with, and is given no other.
-        if (handed !== undefined && script !== undefined) {
-          const inner = runsIn(script.text, shell.vars.get('HOME') === home && !lent.includes('HOME') ? home : undefined, shell.isLost || !handed.isPlain)
+        if (handed !== undefined && text !== undefined) {
+          const inner = runsIn(text.text, shell.vars.get('HOME') === home && !lent.includes('HOME') ? home : undefined, shell.isLost || !handed.isPlain, shell.budget)
 
-          runs.push(...inner.map(one => placed(one, script, after === '&', isDetached || name === 'orca')))
+          runs.push(...inner.map(one => placed(one, text, after === '&', isDetached || name === 'orca')))
         }
         // `exec` may hand the shell's own variables on, and where it stands in a shell of its own zsh goes on from it in that one too, running
         // what follows twice; `env`, `nohup` and `timeout` run a program, which changes none; `command -v` only asks. Behind any of them a
@@ -784,8 +1065,9 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
 }
 
 /** The launches a script makes, read by a shell that begins with this home directory; `isLost` where how that shell reads is not sure. */
-const runsIn = (script: string, home: string | undefined, isLost: boolean): FleetRun[] => {
+const runsIn = (script: string, home: string | undefined, isLost: boolean, budget: { left: number } = { left: LOOP_BUDGET }): FleetRun[] => {
   const shell: Shell = {
+    budget,
     vars: new Map(home === undefined ? [] : [['HOME', home]]),
     sealed: new Set(),
     // `IFS` named anywhere may be `IFS` assigned: what a variable written bare holds may then be parted at any character.

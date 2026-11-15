@@ -582,7 +582,7 @@ test('an Orca worker whose end cannot be learned is let go after an hour, and sa
   on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
 
   await $.session.start(START)
-  await $.tool.call({ tool: 'Bash', command: 'orca terminal create --title "scout" --command "fleet-run codex-scout --cwd /w --spec /w/runs/a/find.spec.md" --json' })
+  await $.tool.call({ tool: 'Bash', command: 'orca terminal create --title "scout" --command "fleet-run codex-scout --cwd /w --spec /w/runs/a/find.spec.md --out \\$OUT_DIR/find.out.md" --json' })
 
   // With no result file named there is nothing to watch: it waits, and says why.
   const flagged = (await $.command.run({ command: 'chiikawa', args: '', ...RUN })).text ?? ''
@@ -819,6 +819,46 @@ test("the drawings follow the person's theme from the next prompt or command, wi
   await $.command.run({ command: 'chiikawa', args: '', ...RUN })
   expect(await frames()).toContain('#2f62b8')
   expect(await frames()).not.toContain('#6fa0ea')
+  await pane.unmount()
+})
+
+test('a reading of the settings that answers after a newer one began writes nothing over what the newer one found', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const row = (value: string) => [{ key: 'theme', label: 'Theme', kind: 'choice' as const, value, provider: { plugin: 'engine', tier: 'core' as const }, isLocked: false }]
+  const box: { calls: number; release?: () => void } = { calls: 0 }
+
+  // The first reading is held well past the time any fairly takes, and then answers with what the settings were.
+  on('config.list', async () => {
+    box.calls += 1
+    if (box.calls > 1) return { value: row('dark') }
+    await new Promise<void>(resolve => {
+      box.release = resolve
+    })
+
+    return { value: row('light') }
+  })
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+
+  const started = $.session.start(START)
+
+  await clock.advance(61_000)
+  await started
+  await $.prompt.submit({ text: '안녕', wait: false, origin: { kind: 'composer' } })
+
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE })
+  const frames = async (): Promise<unknown[]> => (await pane.findAll({ type: 'Text' })).map(text => text.props.color)
+
+  expect(await frames()).toContain('#6fa0ea')
+  // The reading given up on answers at last: the newer one's theme stays.
+  box.release?.()
+  for (let tick = 0; tick < 20; tick += 1) await Promise.resolve()
+  await clock.advance(1000)
+  expect(box.calls).toBeGreaterThan(1)
+  expect(await frames()).toContain('#6fa0ea')
+  expect(await frames()).not.toContain('#2f62b8')
   await pane.unmount()
 })
 
@@ -1597,7 +1637,7 @@ test('of two launches in one command, the one handed to an Orca terminal is wait
   shell(on)
   session(on)
   await $.session.start(START)
-  await $.tool.call({ tool: 'Bash', command: `fleet-run codex-scout --cwd /w --spec ${SPEC}; orca terminal create --title b --command "fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md" --json` })
+  await $.tool.call({ tool: 'Bash', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md; orca terminal create --title b --command "fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md" --json` })
 
   const during = await roster($)
 
@@ -1679,7 +1719,7 @@ test("a spec that already ends in a character's block runs as it is, as that cha
   const { written } = disk(on, clock, { [SPEC]: cast, [OTHER]: `# 다른 일${orcaBlock('ja', 'momonga', '검토')}`, '/w/a/odd.spec.md': `# 손으로 쓴 지시\n\n${MARK}\n보고는 짧게 한다.` })
   const ran = shell(on)
   const launch = (spec: string, call: string): ReturnType<typeof $.tool.call> =>
-    $.tool.call({ tool: 'Bash', tool_use_id: call, command: `orca terminal create --title t --command "fleet-run codex-scout --cwd /w --spec ${spec}" --json` })
+    $.tool.call({ tool: 'Bash', tool_use_id: call, command: `orca terminal create --title t --command "fleet-run codex-scout --cwd /w --spec ${spec} --out ${spec}.out" --json` })
 
   session(on)
   await $.session.start(START)
@@ -1687,7 +1727,7 @@ test("a spec that already ends in a character's block runs as it is, as that cha
   // The worker reads the block that is there and reports as 카니: the page shows the task as 카니's, not as the one the role would have picked.
   const first = await launch(SPEC, 'toolu_a')
 
-  expect(ran.at(-1)).toContain(`--spec ${SPEC}"`)
+  expect(ran.at(-1)).toContain(`--spec ${SPEC} --out`)
   expect(first.context?.join('\n')).toContain('작업은 카니(탐색)가 맡았다.')
   expect(first.context?.join('\n')).not.toContain('사본')
   // A block in another language names its character all the same.
@@ -1695,14 +1735,14 @@ test("a spec that already ends in a character's block runs as it is, as that cha
 
   const during = await roster($)
 
-  expect(during).toContain('🦀 카니 (조사) ◐ 기다리는 중')
-  expect(during).toContain('모몽가 (검토) ◐ 기다리는 중')
+  expect(during).toContain('🦀 카니 (조사) ● 작업 중')
+  expect(during).toContain('모몽가 (검토) ● 작업 중')
   expect(during).toContain('🐰 우사기 (탐색) ○ 대기')
 
   // The mark with no block of the mode's own under it names nobody: the task goes to the one the role picks, and the main loop is told no copy was made.
   const odd = await launch('/w/a/odd.spec.md', 'toolu_c')
 
-  expect(ran.at(-1)).toContain('--spec /w/a/odd.spec.md"')
+  expect(ran.at(-1)).toContain('--spec /w/a/odd.spec.md --out')
   expect(odd.context?.join('\n')).toContain('작업은 우사기(탐색)가 맡았다. 작업지시에 이미 배역 표식이 있어서 말투 사본은 만들지 않았다.')
   expect(written).toEqual([])
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
@@ -2408,6 +2448,11 @@ test('a change of folder in any form keeps a spec named from where the command s
     'chdir sub; fleet-run codex-scout --spec a.md',
     'cd;fleet-run codex-scout --spec a.md',
     'if true; then cd sub; fi; fleet-run codex-scout --spec a.md',
+    "bash -lc 'cd sub && fleet-run codex-scout --cwd . --spec a.md --out b.md'",
+    'zsh -lc "cd sub && fleet-run codex-scout --cwd . --spec a.md --out b.md"',
+    'if cd sub; then fleet-run codex-scout --cwd . --spec a.md --out b.md; fi',
+    'X=1 cd sub && fleet-run codex-scout --cwd . --spec a.md --out b.md',
+    'orca terminal create --worktree path:/other --title t --command "fleet-run codex-scout --cwd . --spec a.md --out b.md" --json',
     'orca terminal create --title t --command="cd sub && fleet-run codex-scout --spec a.md" --json',
   ].entries()) {
     await $.tool.call({ tool: 'Bash', tool_use_id: `toolu_${index}`, command })
@@ -2449,4 +2494,594 @@ test('a cd that is only words to print moves nothing: the spec beside the comman
   expect(ran.at(-1)).toBe("echo 'cd' && fleet-run codex-scout --spec task.chiikawa-usagi.md --out result.md")
   expect(written).toEqual(['task.chiikawa-usagi.md'])
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch fleet-run turns away at once ends then as failed, not after an hour of waiting', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  shell(on)
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `orca terminal create --title scout --command "fleet-run codex-scout --spec ${SPEC} --out /w/a/find.out.md" --json` })
+
+  const now = await roster($)
+
+  expect(now).toContain('🐰 우사기 (탐색) ✗ 실패')
+  expect(now).toContain('--cwd, --spec, --out 필요')
+  expect(now).not.toMatch(/● 작업 중/)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch turned away for a word fleet-run does not take says so, not that its paths are lacking', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  shell(on)
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md --bogus` })
+
+  const now = await roster($)
+
+  expect(now).toContain('🐰 우사기 (탐색) ✗ 실패')
+  expect(now).toContain('받지 않는 인자가 있음')
+  expect(now).not.toContain('--cwd, --spec, --out 필요')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a word a script handed on fills with what is not known here does not turn the launch away: its result is read, and it is paid', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기' })
+
+  shell(on)
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `orca terminal create --title scout --command "fleet-run codex-scout $FLAGS --cwd /w --spec ${SPEC} --out /w/a/find.out.md" --json` })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ● 작업 중')
+  await clock.advance(60_000)
+  put(META, PASSED)
+  await clock.advance(4000)
+  const usage = (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
+
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  expect(usage).toContain('🐰 우사기')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('one result file written two ways is one: the second worker told to write it is not waited for at it', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기', [OTHER]: '# 다른 일' })
+  shell(on)
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: HANDED })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `orca terminal create --title b --command "fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/./find.out.md" --json` })
+
+  const during = await roster($)
+
+  expect(during.match(/● 작업 중/g)).toHaveLength(1)
+  expect(during.match(/◐ 기다리는 중/g)).toHaveLength(1)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+const PANE_ROWS = { ...PANE, scroll: { offset: 0, bodyRows: 60 } } as const
+
+test('a beat held by a call that never answers is passed by: the friends are still asked after, and ended', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const listed = [{ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' }]
+  let calls = 0
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => {
+    calls += 1
+    // The first read never answers (an engine call that hangs once).
+    if (calls === 1) return new Promise(() => undefined) as never
+
+    return { value: listed }
+  })
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await clock.advance(4000)
+  const first = listed[0]
+
+  if (first !== undefined) first.status = 'completed'
+  await clock.advance(60_000)
+  expect(calls).toBeGreaterThan(1)
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ✓ 끝')
+})
+
+test('what a resumed agent spends after a plain clear is still paid to its character', KO, async ($, on) => {
+  mock.clock(on, { now: 1000 })
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  const usage = async (): Promise<string> => (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
+
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer', usage: USED })
+  expect(await usage()).toContain(`🐹 치이카와: ${spent('ko', { fresh: 1000, cached: 0, out: 10 })}`)
+  await $.command.run({ command: 'chiikawa', args: 'clear', ...RUN })
+  // The same agent is resumed (SendMessage) and runs another turn.
+  await $.turn.complete({ ...DONE, turnId: 'turn_2', answer: '더 고쳤습니다.', agentId: 'agent_1', reason: 'answer', usage: USED })
+  expect(await usage()).toContain(`🐹 치이카와: ${spent('ko', { fresh: 2000, cached: 0, out: 20 })}`)
+})
+
+test('the same turn told twice is paid once', KO, async ($, on) => {
+  mock.clock(on, { now: 1000 })
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer', usage: USED })
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer', usage: USED })
+  const usage = (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
+
+  expect(usage).toContain(`🐹 치이카와: ${spent('ko', { fresh: 1000, cached: 0, out: 10 })}`)
+})
+
+test('with a demonstration held, each real wave is counted alone', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  let n = 0
+  const toasts = session(on)
+
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `agent_${(n += 1)}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  await $.session.start(START)
+  await $.command.run({ command: 'chiikawa', args: 'demo on', ...RUN })
+  await $.agent.spawn(SPAWN)
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  await clock.advance(1000)
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2' })
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_2', reason: 'answer' })
+  await clock.advance(1000)
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_3' })
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_3', reason: 'answer' })
+  const all = toasts.join('\n')
+
+  await $.command.run({ command: 'chiikawa', args: 'demo off', ...RUN })
+  // Three separate one-task waves: none should be summed as 2 or 3.
+  expect(all).not.toMatch(/3개 작업 끝/)
+  expect(all).not.toMatch(/2개 작업 끝/)
+})
+
+test('a task taken late, after one behind it was let pass, starts a wave of its own and does not take the newer one back', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const toasts = session(on)
+  const box: { isHeld: boolean; release?: () => void } = { isHeld: false }
+
+  on('agent.spawn', ($, e) => ({ model: 'claude-sonnet-5-5', agentId: `agent_${e.tool_use_id}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  // The roles are read in time but for once, when they are held well past the time any fairly takes.
+  on('state.get', { plugin: 'chiikawa', key: 'roles' }, async ($, e, next) => {
+    if (box.isHeld) {
+      box.isHeld = false
+      await new Promise<void>(resolve => {
+        box.release = resolve
+      })
+    }
+
+    return next(e)
+  })
+  await $.session.start(START)
+  box.isHeld = true
+  const first = $.agent.spawn(SPAWN)
+
+  for (let tick = 0; tick < 20; tick += 1) await Promise.resolve()
+  const second = $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2' })
+
+  for (let tick = 0; tick < 20; tick += 1) await Promise.resolve()
+  await clock.advance(61_000)
+  // The one behind it is let pass, and ends, a wave of one.
+  await second
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_toolu_2', reason: 'answer' })
+  await clock.advance(1000)
+  box.release?.()
+  await first
+  await clock.advance(1000)
+  await $.turn.complete({ ...DONE, turnId: 'turn_2', answer: '끝냈습니다.', agentId: 'agent_toolu_1', reason: 'answer' })
+  const all = toasts.join('\n')
+
+  expect(all).not.toMatch(/2개 작업 끝/)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a task held in its list write after its clock read is counted in its own wave, not in the wave passed by', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const toasts = session(on)
+  const box: { isArmed: boolean; isHeld: boolean; release?: () => void } = { isArmed: false, isHeld: false }
+
+  on('agent.spawn', ($, e) => ({ model: 'claude-sonnet-5-5', agentId: `agent_${e.tool_use_id}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  // The roles read arms a hold on the list's next read: the one reserve's write makes, after its clock is read.
+  on('state.get', { plugin: 'chiikawa', key: 'roles' }, async ($, e, next) => {
+    if (box.isArmed) {
+      box.isArmed = false
+      box.isHeld = true
+    }
+
+    return next(e)
+  })
+  on('state.get', { plugin: 'chiikawa', key: 'tasks' }, async ($, e, next) => {
+    if (box.isHeld) {
+      box.isHeld = false
+      await new Promise<void>(resolve => {
+        box.release = resolve
+      })
+    }
+
+    return next(e)
+  })
+  await $.session.start(START)
+  box.isArmed = true
+  const first = $.agent.spawn(SPAWN)
+
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  expect(box.release).toBeDefined()
+  const second = $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2' })
+  const third = $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_3' })
+
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  await clock.advance(61_000)
+  await second
+  await third
+  await $.turn.complete({ ...DONE, turnId: 'turn_2', answer: '끝냈습니다.', agentId: 'agent_toolu_2', reason: 'answer' })
+  await $.turn.complete({ ...DONE, turnId: 'turn_3', answer: '끝냈습니다.', agentId: 'agent_toolu_3', reason: 'answer' })
+  const before = toasts.filter(one => /2개 작업 끝/.test(one)).length
+
+  await clock.advance(1000)
+  box.release?.()
+  await first
+  await clock.advance(1000)
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '끝냈습니다.', agentId: 'agent_toolu_1', reason: 'answer' })
+  const after = toasts.filter(one => /2개 작업 끝/.test(one)).length
+
+  // The passed-by wave of two is told once; the late task's own wave of one tells no sum.
+  expect([before, after]).toEqual([1, 1])
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('the work done today is counted past the tasks kept', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  mock.clock(on, { now: 1000 })
+  const box = { spawned: 0 }
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `agent_${(box.spawned += 1)}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  for (let turn = 1; turn <= 45; turn += 1) {
+    await $.agent.spawn({ ...SPAWN, tool_use_id: `toolu_${turn}` })
+    await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: `agent_${turn}`, reason: 'answer' })
+  }
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+
+  await pane.press({ key: 'watch-hachiware' })
+  const any = await pane.find({ type: 'Text', text: /개 끝$/ })
+  const found = await pane.find({ type: 'Text', text: /^오늘 +45개 끝$/ })
+  const forty = await pane.find({ type: 'Text', text: /^오늘 +4[01]개 끝$/ })
+
+  await pane.unmount()
+  expect(any).toBeDefined()
+  expect(forty).toBeUndefined()
+  expect(found).toBeDefined()
+})
+
+test('the work done today outlasts a plain clear', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  mock.clock(on, { now: 1000 })
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  await $.agent.spawn(SPAWN)
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  const pane0 = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+
+  await pane0.press({ key: 'watch-hachiware' })
+  await pane0.press({ key: 'watch-close' })
+  await pane0.unmount()
+  await $.command.run({ command: 'chiikawa', args: 'clear', ...RUN })
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+
+  await pane.press({ key: 'watch-hachiware' })
+  const found = await pane.find({ type: 'Text', text: /^오늘 +1개 끝$/ })
+
+  await pane.unmount()
+  expect(found).toBeDefined()
+})
+
+test('while 하치와레 works himself, the story does not say he waits for work', KO, async ($, on) => {
+  mock.clock(on, { now: 1000 })
+
+  session(on)
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', command: 'npm run build' })
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+  const alone = await pane.find({ type: 'Text', text: /직접 하는 중/ })
+  const waiting = await pane.find({ type: 'Text', text: /일감을 기다리는 중/ })
+
+  await pane.unmount()
+  expect(alone).toBeDefined()
+  expect(waiting).toBeUndefined()
+})
+
+test('a doubted Orca worker a plain clear takes off the list is still paid for the result it leaves', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기' })
+
+  session(on)
+  on('tool.call', () => ({ isError: true as const, result: 'orca: 실행 중이 아님', text: 'orca: 실행 중이 아님' }))
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', command: HANDED })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✗ 실패')
+  await $.command.run({ command: 'chiikawa', args: 'clear', ...RUN })
+  await clock.advance(60_000)
+  put(META, PASSED)
+  await clock.advance(4000)
+  const usage = (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
+
+  expect(usage).toContain('🐰 우사기')
+})
+
+test('a doubted Orca worker is paid for the result it leaves', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기' })
+
+  session(on)
+  on('tool.call', () => ({ isError: true as const, result: 'orca: 실행 중이 아님', text: 'orca: 실행 중이 아님' }))
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', command: HANDED })
+  await clock.advance(60_000)
+  put(META, PASSED)
+  await clock.advance(4000)
+  const usage = (await $.command.run({ command: 'chiikawa', args: 'usage', ...RUN })).text ?? ''
+
+  expect(usage).toContain('🐰 우사기')
+})
+
+test('the beat ends an agent the list says has completed', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const listed = [{ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' }]
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: listed }))
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await clock.advance(4000)
+  const first = listed[0]
+
+  if (first !== undefined) first.status = 'completed'
+  await clock.advance(60_000)
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ✓ 끝')
+})
+
+test("a guess at an end that is held long, and counted after the sure end, does not move the day's count back", { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const listed = [{ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'failed' }]
+  const box: { isArmed: boolean; release?: () => void } = { isArmed: false }
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: listed }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  // The day's count is read in time but for once: by the guess the beat makes, held well past the time any fairly takes.
+  on('state.get', { plugin: 'chiikawa', key: 'today' }, async ($, e, next) => {
+    if (box.isArmed) {
+      box.isArmed = false
+      await new Promise<void>(resolve => {
+        box.release = resolve
+      })
+    }
+
+    return next(e)
+  })
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await clock.advance(4000)
+  const first = listed[0]
+
+  if (first !== undefined) first.status = 'failed'
+  box.isArmed = true
+  await clock.advance(60_000)
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  expect(box.release).toBeDefined()
+  // How it really went comes in, and passes the guess held in the line.
+  const sure = $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  await clock.advance(61_000)
+  await sure
+  box.release?.()
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  await clock.advance(1000)
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+
+  await pane.press({ key: 'watch-hachiware' })
+  const found = await pane.find({ type: 'Text', text: /^오늘 +1개 끝$/ })
+
+  await pane.unmount()
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ✓ 끝')
+  expect(found).toBeDefined()
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("an end counted late, after the next day's were, leaves the next day's count as it is", { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  // A minute to midnight, where the person is.
+  const midnight = new Date(2026, 10, 16).getTime()
+  const clock = mock.clock(on, { now: midnight - 60_000 })
+  const box: { isArmed: boolean; release?: () => void; seen?: { day: string; done: string[] } } = { isArmed: false }
+
+  session(on)
+  on('agent.spawn', ($, e) => ({ model: 'claude-sonnet-5-5', agentId: `agent_${e.tool_use_id}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('state.get', { plugin: 'chiikawa', key: 'today' }, async ($, e, next) => {
+    if (box.isArmed) {
+      box.isArmed = false
+      await new Promise<void>(resolve => {
+        box.release = resolve
+      })
+    }
+    const held = await next(e)
+
+    box.seen = held.value?.value as { day: string; done: string[] } | undefined
+
+    return held
+  })
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2' })
+  // The one ended before midnight is counted late: its read of the day's count is held.
+  box.isArmed = true
+  void $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_toolu_1', reason: 'answer' })
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  expect(box.release).toBeDefined()
+  const next = $.turn.complete({ ...DONE, turnId: 'turn_2', answer: '끝냈습니다.', agentId: 'agent_toolu_2', reason: 'answer' })
+
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  await clock.advance(61_000)
+  await next
+  box.release?.()
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  await clock.advance(1000)
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+
+  await pane.unmount()
+  expect(box.seen?.day).toBe('2026-11-16')
+  expect(box.seen?.done).toEqual(['agent_toolu_2'])
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('an end held in its count while all is cleared is not counted after it', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const box: { isArmed: boolean; release?: () => void; seen?: { done: string[] } } = { isArmed: false }
+
+  session(on)
+  on('agent.spawn', ($, e) => ({ model: 'claude-sonnet-5-5', agentId: `agent_${e.tool_use_id}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('state.get', { plugin: 'chiikawa', key: 'today' }, async ($, e, next) => {
+    if (box.isArmed) {
+      box.isArmed = false
+      await new Promise<void>(resolve => {
+        box.release = resolve
+      })
+    }
+    const held = await next(e)
+
+    box.seen = held.value?.value as { done: string[] } | undefined
+
+    return held
+  })
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  box.isArmed = true
+  const ending = $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_toolu_1', reason: 'answer' })
+
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  expect(box.release).toBeDefined()
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+  box.release?.()
+  await ending
+  await clock.advance(1000)
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+
+  await pane.unmount()
+  expect(box.seen?.done ?? []).toEqual([])
+})
+
+test('an end held in its pay while all is cleared is not counted after it', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const box: { isArmed: boolean; release?: () => void; seen?: { done: string[] } } = { isArmed: false }
+
+  session(on)
+  on('agent.spawn', ($, e) => ({ model: 'claude-sonnet-5-5', agentId: `agent_${e.tool_use_id}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('state.get', { plugin: 'chiikawa', key: 'paid' }, async ($, e, next) => {
+    if (box.isArmed) {
+      box.isArmed = false
+      await new Promise<void>(resolve => {
+        box.release = resolve
+      })
+    }
+
+    return next(e)
+  })
+  on('state.get', { plugin: 'chiikawa', key: 'today' }, async ($, e, next) => {
+    const held = await next(e)
+
+    box.seen = held.value?.value as { done: string[] } | undefined
+
+    return held
+  })
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  box.isArmed = true
+  const ending = $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_toolu_1', reason: 'answer', usage: { input_tokens: 10, output_tokens: 5 } } as never)
+
+  for (let tick = 0; tick < 300; tick += 1) await Promise.resolve()
+  const isHeld = box.release !== undefined
+
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+  box.release?.()
+  await ending
+  await clock.advance(1000)
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+
+  await pane.unmount()
+  expect(isHeld).toBe(true)
+  expect(box.seen?.done ?? []).toEqual([])
+})
+
+test('each launch of a loop is a task of its own, each waited for at its own result', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { '/w/a.md': '# a', '/w/b.md': '# b' })
+  shell(on)
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: 'for t in a b; do fleet-run codex-scout --cwd /w --spec /w/$t.md --out /w/$t.out.md & done; wait' })
+
+  const during = await roster($)
+
+  expect(during.match(/● 작업 중/g)).toHaveLength(2)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a session under way before the day's count was kept counts on from the tasks it holds that ended today", KO, async ($, on) => {
+  mock.clock(on, { now: 1000 })
+  let n = 0
+  const box = { isReset: false }
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `agent_${(n += 1)}` }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  // The next read of the day's count finds it as a version before it was kept left it: not there.
+  on('state.get', { plugin: 'chiikawa', key: 'today' }, async ($, e, next) => {
+    const held = await next(e)
+
+    if (!box.isReset || held.value === undefined) return held
+    box.isReset = false
+
+    return { value: { ...held.value, value: { day: '', done: [], failed: [] } } }
+  })
+  await $.agent.spawn(SPAWN)
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_2' })
+  await $.turn.complete({ ...DONE, turnId: 'turn_2', answer: '끝냈습니다.', agentId: 'agent_2', reason: 'answer' })
+  // As before the count was kept: the tasks are there, and the count is not.
+  box.isReset = true
+  await $.agent.spawn({ ...SPAWN, tool_use_id: 'toolu_3' })
+  await $.turn.complete({ ...DONE, turnId: 'turn_3', answer: '끝냈습니다.', agentId: 'agent_3', reason: 'answer' })
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: PANE_ROWS })
+
+  await pane.press({ key: 'watch-hachiware' })
+  const found = await pane.find({ type: 'Text', text: /^오늘 +3개 끝$/ })
+
+  await pane.unmount()
+  expect(found).toBeDefined()
 })
