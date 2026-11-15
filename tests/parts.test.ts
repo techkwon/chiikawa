@@ -143,6 +143,11 @@ test('a role the person gave puts that character first for it, and takes it out 
   // A role with everyone moved out of it falls back on those it was first given to, past the main two.
   expect(pickMember('조사', [], undefined, { kani: '검토', shisa: '검토', usagi: '검토' })).toBe('chiikawa')
   expect(pickMember('조사', [task('chiikawa', 'running')], undefined, { kani: '검토', shisa: '검토', usagi: '검토' })).toBe('kani')
+  // With the role's own busy, the last free guest is not one the person moved to another role.
+  const busy = ['chiikawa', 'usagi', 'shisa', 'pochette', 'kani', 'kurimanju', 'momonga'].map(id => task(id as never, 'running'))
+
+  expect(pickMember('구현', busy, undefined, { rakko: '검토' })).toBe('chiikawa')
+  expect(pickMember('구현', busy)).toBe('rakko')
   // Its own role again is no change kept; 하치와레 and 노동 갑옷 씨 have no role to change.
   expect(withRole(given, 'rakko', '구현')).toEqual({})
   expect(withRole(given, 'rakko', null)).toEqual({})

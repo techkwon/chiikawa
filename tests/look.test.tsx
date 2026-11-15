@@ -8,7 +8,7 @@ const DESKTOP_START = { cwd: '/w', surface: 'desktop', isInteractive: true } as 
 const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as const
 
 /** Records each theme set and clear, and keeps what the mode stores. */
-const world = (on: On): { sets: unknown[]; clears: number[]; kept: Map<string, unknown> } => {
+const world = (on: On, isSaveFailing = false): { sets: unknown[]; clears: number[]; kept: Map<string, unknown> } => {
   const sets: unknown[] = []
   const clears: number[] = []
   const kept = new Map<string, unknown>()
@@ -16,6 +16,7 @@ const world = (on: On): { sets: unknown[]; clears: number[]; kept: Map<string, u
   mock.clock(on, { now: 1000 })
   on('store.get', ($, e) => ({ value: kept.get(e.key) }))
   on('store.set', ($, e) => {
+    if (isSaveFailing && e.key === 'look') throw new Error('disk full')
     kept.set(e.key, e.value)
 
     return { value: undefined }
@@ -78,6 +79,16 @@ test('/chiikawa look off clears and is kept, and look on sets it again', KO, asy
   expect(back.text).toContain('들판 배경과 색을 입혔어요')
   expect(sets).toHaveLength(2)
   expect(kept.get('look')).toBe('on')
+})
+
+test('/chiikawa look off that could not be saved says it holds for this session only, and look shows it off', KO, async ($, on) => {
+  world(on, true)
+  await $.session.start(DESKTOP_START)
+  const off = await $.command.run({ command: 'chiikawa', args: 'look off', ...RUN })
+
+  expect(off.text).toContain('배경과 색을 뺐어요')
+  expect(off.text).toContain('이번 세션에만')
+  expect((await $.command.run({ command: 'chiikawa', args: 'look', ...RUN })).text).toContain('꺼짐')
 })
 
 test('the meadow is drawn on the desktop for this mod alone, as one SVG with no script', KO, async ($, on) => {

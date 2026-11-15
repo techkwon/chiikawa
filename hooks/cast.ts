@@ -383,7 +383,8 @@ export const pickMember = (role: Role, tasks: readonly Task[], specialist?: Memb
   const own = given.length + stayed.length > 0 ? [...given, ...stayed] : PREFERENCE[wanted]
   const first = specialist !== undefined && roles[specialist] === undefined ? specialist : undefined
   const order = (first === undefined ? own : [first, ...own.filter(id => id !== first)]).filter(id => !MAIN_WORKERS.includes(id))
-  const guests = [...order, ...WORKERS.filter(id => !MAIN_WORKERS.includes(id) && !order.includes(id))]
+  // The rest come after, but not one the person gave another role: they took it off this work by name.
+  const guests = [...order, ...WORKERS.filter(id => !MAIN_WORKERS.includes(id) && !order.includes(id) && (roles[id] === undefined || roles[id] === wanted))]
 
   return guests.find(isFree) ?? main[0]
 }

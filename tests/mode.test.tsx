@@ -2228,6 +2228,30 @@ test('a shell command sent to the background is a task of a character, ended by 
   expect(ended).toContain('✗ 실패')
 })
 
+test('a background command whose description says exit code 0 but ended with exit code 1 is a failure', KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.invalidate', () => ({ value: undefined }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('tool.call', ($, e) => {
+    if (e.tool !== 'Bash') return { result: { stdout: '', stderr: '' } } as never
+
+    return { result: { stdout: '', stderr: '', ...(e.run_in_background === true ? { backgroundTaskId: 'bx1' } : {}) } } as never
+  })
+
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'bun test exit', description: 'Check exit code 0 handling', run_in_background: true })
+  await $.prompt.submit({ text: '<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n<summary>Background command "Check exit code 0 handling" completed (exit code 1)</summary>\n</task-notification>', wait: false, origin: { kind: 'task-notification' } })
+
+  const ended = await roster($)
+
+  expect(ended).toContain('✗ 실패')
+  expect(ended).not.toContain('✓ 끝')
+})
+
 test('a background command done leaves no mark by its friend in the desktop band, then or later', KO, async ($, on) => {
   const clock = mock.clock(on, { now: 5000 })
 

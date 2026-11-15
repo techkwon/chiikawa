@@ -234,6 +234,8 @@ export type Words = {
   lookDay: string
   lookNight: string
   lookUndrawn: (reason: string) => string
+  /** Added where the choice could not be saved for later sessions. */
+  lookNotKept: string
   lookHelp: (state: 'auto' | 'day' | 'night' | 'off') => string
   pictures: (folder: string, found: string[], files: number, small: number, skipped: { file: string; why: 'large' | 'unread' }[]) => string
   talkOnly: string
@@ -431,6 +433,7 @@ const KO: Words = {
   demoStopped: '시연을 껐어요. 가짜 작업 4개가 지금 끝나요(3개 성공, 1개 실패).',
   demoNone: '켜 둔 시연이 없어요. /chiikawa demo on 으로 켤 수 있어요.',
   lookOn: '데스크톱 앱에 먼작귀 들판 배경과 색을 입혔어요. 낮에는 분홍빛 들판, 밤(다크 모드)에는 별이 반짝이는 하늘이에요. 끄려면 /chiikawa look off',
+  lookNotKept: '다만 다음 세션까지 저장하지 못해서, 이번 세션에만 적용돼요.',
   lookOff: '배경과 색을 뺐어요. 다음 세션에서도 꺼진 채로 둘게요. 다시 켜려면 /chiikawa look on',
   lookUndrawn: reason => `배경과 색을 정해 두었지만 지금 이 화면은 그리지 않아요(${reason}). 데스크톱 앱 Code 탭의 로컬 세션에서 보여요.`,
   lookDay: '앱 전체를 분홍빛 낮 들판으로 바꿨어요. 앱이 다크 모드여도 밝은 낮 색으로 칠해요. 앱 모드를 따르게 하려면 /chiikawa look on',
@@ -637,6 +640,7 @@ const EN: Words = {
   demoStopped: 'The demo is off. Its four made-up tasks end now (3 done, 1 failed).',
   demoNone: 'No demo is on. Turn one on with /chiikawa demo on.',
   lookOn: 'The desktop app now has the Chiikawa meadow behind the conversation and its colors: a pink meadow by day, a starry sky in dark mode. Take it off with /chiikawa look off',
+  lookNotKept: 'It could not be saved for later sessions, so it holds for this session only.',
   lookOff: 'Took the meadow and its colors off, and they stay off in later sessions. Put them back with /chiikawa look on',
   lookUndrawn: reason => `The meadow and its colors are set, but nothing here draws them now (${reason}). They show in local sessions in the desktop app's Code tab.`,
   lookDay: "The whole app is now the pink daytime meadow, even while the app is in dark mode. To follow the app's mode again: /chiikawa look on",
@@ -839,6 +843,7 @@ const JA: Words = {
   demoStopped: 'デモをオフにしました。見せかけの作業4件が今終わります(3件成功、1件失敗)。',
   demoNone: 'オンになっているデモはありません。/chiikawa demo on でオンにできます。',
   lookOn: 'デスクトップアプリに、ちいかわの野原の背景と色をつけました。昼はピンクの野原、ダークモードでは星がまたたく夜空です。外すには /chiikawa look off',
+  lookNotKept: 'ただ、次のセッションまで保存できなかったので、このセッションだけに効きます。',
   lookOff: '背景と色を外しました。次のセッションでも外したままにします。戻すには /chiikawa look on',
   lookUndrawn: reason => `背景と色は設定しましたが、いまこの画面には描かれません（${reason}）。デスクトップアプリの Code タブのローカルセッションで表示されます。`,
   lookDay: 'アプリ全体をピンクの昼の野原にしました。アプリがダークモードでも明るい昼の色で塗ります。アプリのモードに合わせるには /chiikawa look on',

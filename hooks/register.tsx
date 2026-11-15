@@ -160,8 +160,13 @@ const keepPictures = async ($: Engine): Promise<PicturesRead> => {
   picturesSeen = undefined
   // The same pictures as before are not written again: nothing is drawn again for them.
   if (stamp !== (await read($, picturesAt).catch(() => undefined))) {
-    await update($, pictures, () => found.table).catch(() => undefined)
-    await update($, picturesAt, () => stamp).catch(() => undefined)
+    // The stamp moves only once the table is written: a write that failed is tried again on the next reading of the same pictures.
+    const isWritten = await update($, pictures, () => found.table).then(
+      () => true,
+      () => false,
+    )
+
+    if (isWritten) await update($, picturesAt, () => stamp).catch(() => undefined)
   }
 
   return found
@@ -1328,7 +1333,8 @@ const endShells = async ($: Engine, text: string): Promise<void> => {
     if (task === undefined) continue
     const status = field(block, 'status') ?? ''
     const summary = field(block, 'summary') ?? ''
-    const code = /exit code (\d+)/i.exec(summary)?.[1]
+    // The code is the one the notice ends with: the command's own description may hold the same words.
+    const code = /\(exit code (\d+)\)\s*$/i.exec(summary)?.[1]
 
     await settle($, task.id, { isOk: status === 'completed' && (code === undefined || code === '0'), ...(summary === '' ? {} : { summary: [summary.slice(0, 200)] }) })
   }
@@ -1487,18 +1493,20 @@ export const register: Register = (on, options) => {
       const how = LOOK_WORDS[words[0] ?? '']
 
       if (how === 'off') {
-        await keepLook($, 'off')
+        const isKept = await keepLook($, 'off')
+
         await clearLook($).catch(() => undefined)
 
-        return { text: said.lookOff }
+        return { text: isKept ? said.lookOff : `${said.lookOff} ${said.lookNotKept}` }
       }
       if (how !== undefined) {
-        await keepLook($, how)
+        const isKept = await keepLook($, how)
         const set = await setLook($, how).catch((error: unknown) => ({ isDrawn: false, reason: String(error) }))
 
         if (!set.isDrawn) return { text: said.lookUndrawn(set.reason ?? '') }
+        const done = how === 'day' ? said.lookDay : how === 'night' ? said.lookNight : said.lookOn
 
-        return { text: how === 'day' ? said.lookDay : how === 'night' ? said.lookNight : said.lookOn }
+        return { text: isKept ? done : `${done} ${said.lookNotKept}` }
       }
 
       return { text: said.lookHelp(isLookWanted ? await lookKept($) : 'off') }

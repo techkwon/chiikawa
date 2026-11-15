@@ -130,6 +130,8 @@ export type LookKept = 'off' | LookTime
 
 /** The person's last choice, kept from one session to the next; `auto` where none was made. */
 export async function lookKept($: Engine): Promise<LookKept> {
+  // A choice that could not be kept holds for this session.
+  if (lookHeld !== undefined) return lookHeld
   const kept = await $.store.get(LOOK_KEPT).catch(() => undefined)
 
   if (kept === 'off' || kept === 'day' || kept === 'night') return kept
@@ -142,9 +144,19 @@ export async function isLookKeptOff($: Engine): Promise<boolean> {
   return (await lookKept($)) === 'off'
 }
 
-/** Keeps the person's choice for the next session. */
-export async function keepLook($: Engine, wanted: LookKept): Promise<void> {
-  await $.store.set(LOOK_KEPT, wanted === 'auto' ? 'on' : wanted).catch(() => undefined)
+/** A choice made in this session that could not be kept for the next: it holds here. */
+let lookHeld: LookKept | undefined
+
+/** Keeps the person's choice for the next session, and answers whether it was kept; where it was not, it holds for this session. */
+export async function keepLook($: Engine, wanted: LookKept): Promise<boolean> {
+  const isKept = await $.store.set(LOOK_KEPT, wanted === 'auto' ? 'on' : wanted).then(
+    () => true,
+    () => false,
+  )
+
+  lookHeld = isKept ? undefined : wanted
+
+  return isKept
 }
 
 /** The scene a Backdrop render asks for: `scene` from v2.1.323, `id` before. */

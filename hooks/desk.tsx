@@ -468,7 +468,7 @@ const Title = (kit: DeskKit, scene: Scene, isOn: boolean): RenderElement => {
 
 /** The pane's small form: the friends' marks, the ones at work with their dots. Nothing to press, for a click may not reach it. */
 const Glance = (kit: DeskKit, scene: Scene, isOn: boolean): RenderElement => {
-  const { Box, Text } = kit
+  const { Box } = kit
   const latest = lastSaid(scene)
 
   return (
