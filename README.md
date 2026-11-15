@@ -2,7 +2,7 @@
 
 English · [한국어](README.ko.md) · [日本語](README.ja.md)
 
-A mod (plugin) for Claude Code in which **Hachiware conducts, and Chiikawa, Usagi and their friends take the work and talk it over like a comic**. A cut and a speech bubble for each character show who is doing what right now. It is an **unofficial fan mod** made by a fan of the comic Chiikawa (ちいかわ). It has nothing to do with the author Nagano (ナガノ), the publisher, the animation producers or any other rights holder, and none of them has approved it. It uses no official art or logo: the text drawings and pixel icons on the screen were drawn for this mod. It runs in English, Korean or Japanese (English by default, Korean for a Korean reader, Japanese for a Japanese reader). Version 0.2.0.
+A mod (plugin) for Claude Code in which **Hachiware conducts, and Chiikawa, Usagi and their friends take the work and talk it over like a comic**. A cut and a speech bubble for each character show who is doing what right now. It is an **unofficial fan mod** made by a fan of the comic Chiikawa (ちいかわ). It has nothing to do with the author Nagano (ナガノ), the publisher, the animation producers or any other rights holder, and none of them has approved it. It uses no official art or logo: the text drawings and pixel icons on the screen were drawn for this mod. It runs in English, Korean or Japanese (English by default, Korean for a Korean reader, Japanese for a Japanese reader). Version 0.3.32.
 
 ![Three friends at work at the same time](docs/screenshots/en/working.png)
 
@@ -31,11 +31,18 @@ Tell Hachiware something like "have Rakko find the cause of the login bug, Kurim
 
 ### What you need
 
-- **Claude Code**: the program you run as `claude` in a terminal. If you do not have it yet, install it first from the [Claude Code page](https://claude.com/claude-code).
-- The mod was built and tested on Claude Code 2.1.291. Check yours with `claude --version`, and bring an old one up to date with `claude update`.
+- **Claude Code**: the program you run as `claude` in a terminal. If you do not have it yet, install it first from the [Claude Code page](https://claude.com/claude-code). The Code tab of the Claude desktop app uses it too.
+- The mod was tested on Claude Code 2.1.325. Check yours with `claude --version`, and bring an old one up to date with `claude update`.
 - Nothing else. There is no Node.js or other program to install.
 
-### Installing
+Pick one of the two ways below by where you use Claude Code.
+
+| Where you use it | How to install |
+|---|---|
+| Claude Code run in a terminal | [Option 1](#option-1-in-the-claude-code-prompt) or [Option 2](#option-2-two-lines-in-a-terminal) |
+| The Code tab of the Claude desktop app | [Option 2](#option-2-two-lines-in-a-terminal), then [Using it in the desktop app](#using-it-in-the-desktop-app) |
+
+### Option 1: in the Claude Code prompt
 
 1. Open a terminal and run `claude`.
 2. Paste this one line into Claude Code's prompt and press Enter.
@@ -48,50 +55,90 @@ Tell Hachiware something like "have Rakko find the cause of the login bug, Kurim
    - If it asks whether to add the marketplace, accept. A marketplace is a place plugins are fetched from (here, this GitHub repository) that Claude Code keeps on record.
    - If it asks for a scope (where the mod is to be used), choose user. The mod is then there in every project.
    - If it asks for settings, go on as it is unless you want something changed. You can change it later.
-4. When a line says the install is finished, you are done. If `/chiikawa` is not there right away, start Claude Code again.
+4. When a line says the install is done, you are done. If `/chiikawa` does not show up at once, start Claude Code again.
 
-The same install can be done in two lines from a terminal, outside Claude Code.
+### Option 2: two lines in a terminal
+
+Run these two lines one after the other in a terminal, outside Claude Code. The first adds this repository as a marketplace, and the second installs the mod (in the user scope, for every project).
 
 ```
 claude plugin marketplace add techkwon/chiikawa
+```
+
+```
 claude plugin install chiikawa@chiikawa
 ```
 
-To give settings as you install, add `--config` (it can be repeated). For example, to fix the screen to Korean:
+To give settings with the install, add `--config` (it can be repeated). For example, to keep the screen in Korean. The settings are listed under [Settings](#settings).
 
 ```
 claude plugin install chiikawa@chiikawa --config language=ko
 ```
 
+### Using it in the desktop app
+
+1. Install with the two lines of [Option 2](#option-2-two-lines-in-a-terminal).
+2. Quit the Claude desktop app completely (Cmd+Q on macOS) and open it again. The mod is loaded as the app starts.
+3. Open a local session in the Code tab and type `/chiikawa` in the prompt. The friends' status pane opens on the right. The open-pane button in the band above the prompt also opens and closes it.
+4. To see the screen without giving any work, type `/chiikawa demo` (about 15 seconds) or `/chiikawa demo on` (until you type `/chiikawa demo off`). The tasks are pretend ones and do nothing.
+
+In the desktop app the meadow backdrop and the app's colors change too. Type `/chiikawa look off` to turn them off.
+
 ### Checking that it is installed
 
 In a terminal, run `claude plugin list` and see that `chiikawa@chiikawa` is on the list. Then type `/chiikawa` in Claude Code's prompt. The friends' status pane opens and the reply says `Opened the friends' status pane.` (on a Korean screen, `먼작귀 친구들 현황 패널을 열었어요.`).
+
+### Adding your own pictures (optional)
+
+In the desktop app, pictures of your own (GIF, PNG, WebP or JPG) can stand in for the friends' emoji. The mod comes with no pictures. Put in only pictures you drew yourself or have the right to use.
+
+1. Put the files in `~/.claude/chiikawa-pictures/` in your home folder, named by the friend's English name: `hachiware`, `chiikawa`, `usagi`, `rakko`, `shisa`, `kurimanju`, `kani`, `pochette`, `momonga`, `rodo`.
+   - `hachiware.gif`: the friend's base picture, used for any state without its own.
+   - With a state added, as in `hachiware-working.gif`, it is used for that state alone. The states: `idle`, `working`, `done`, `fail`, `waiting`, `slow`.
+   - Each file must be 48 KB or less; a larger one is left out, and you are told. About 256 px is plenty.
+2. Small pictures for the band above the prompt go in the `band/` folder inside it, with the same names (for example `band/hachiware-working.gif`). Each must be 10 KB or less; about 72 px is enough. Without them the band keeps the emoji.
+3. Type `/chiikawa pictures` in Claude Code to read the folder again. The reply says how many pictures it took and which files it left out. The folder is also read when a session starts.
+
+A screen with too many pictures can fail to draw, so the mod sets how much picture data goes into one drawing. Places past that take a small picture or the emoji.
 
 ### Another way (from a copy of the repository)
 
 ```
 git clone https://github.com/techkwon/chiikawa.git
+```
+
+```
 claude --plugin-dir ./chiikawa
 ```
 
-This loads the mod for that session only. Use it to work on the mod, or to try it without installing it.
+This loads the mod for that session alone. Use it to try changes to the mod, or to try it for a while without installing.
 
 ### Updating and removing
 
-Run these in a terminal, outside Claude Code.
+Run these in a terminal, outside Claude Code. An update reads the marketplace again and then brings the mod up to date.
+
+```
+claude plugin marketplace update chiikawa
+```
 
 ```
 claude plugin update chiikawa@chiikawa
+```
+
+To remove it:
+
+```
 claude plugin uninstall chiikawa@chiikawa
 ```
 
-An update takes effect after Claude Code is started again. To turn the mod off for a while, do not remove it: type `/chiikawa off`, and `/chiikawa on` to turn it back on. Whether it is on or off is kept in that session's state alone and is not saved to disk, and the default is on.
+An update takes effect after Claude Code is started again (in the desktop app, quit the app and open it again). To turn the mod off for a while, do not remove it: type `/chiikawa off`, and `/chiikawa on` to turn it back on. Whether it is on or off is kept in that session's state alone and is not saved to disk, and the default is on.
 
-`claude plugin uninstall` removes the mod alone. Three things may be left for you to clear. More about each is under [Privacy](#privacy).
+`claude plugin uninstall` removes the mod alone. Four things may be left for you to clear. More about the first three is under [Privacy](#privacy).
 
 - **The saved roles and language.** They are in Claude Code's plugin store, not in the mod's folder. By its help, `claude plugin uninstall` removes the plugin's persistent data directory unless you add `--keep-data`, but this guide does not promise that these two values go with it. To be sure they are cleared, type `/chiikawa role reset` and `/chiikawa lang auto` in Claude Code before you uninstall. Do it last: a prompt typed afterwards in Hangul or kana is remembered again.
 - **The marketplace entry** (the record of where the mod was fetched from). It has a command of its own: `claude plugin marketplace remove chiikawa`.
 - **Orca voice copies**, only if you used Orca with `orcaVoice` on. They are the files named `<name>.chiikawa-<character>.md` beside your spec files. The mod never deletes them. Delete the ones you do not need by hand.
+- **Your picture folder** `~/.claude/chiikawa-pictures/`, only if you made one. Its files are yours, and the mod never deletes them.
 
 ## First steps
 
@@ -242,6 +289,7 @@ Press `Talk only` at the end of the talk row, or type `/chiikawa talk`, and the 
 |---|---|
 | `/chiikawa` | Opens the friends' status pane, and shows the status and the recent talk as text too |
 | `/chiikawa demo` | Runs four made-up tasks for about 15 seconds to show the screen. No real work is done. Only while the mode is on |
+| `/chiikawa demo on` · `/chiikawa demo off` | `on` keeps the made-up tasks at work and does not end them (to take a picture of the screen, or to look at it for long). `off` lets each one end as it would have |
 | `/chiikawa on` · `/chiikawa off` | Turns the mode on and off. Off, the voice instructions stop, and the band, the spinner text and the line after a turn are no longer drawn. A pane that is already open is not closed: it stays, with `off` at the right of its title. Work already handed out is still closed and its usage counted when it ends, even while the mode is off (an Orca worker's result is read once the mode is back on), with no toast and no line in the talk |
 | `/chiikawa usage` | Shows the usage (context, limits, cost, tokens per friend) as text |
 | `/chiikawa talk` | Turns the pane to the talk alone. Typed once more, it goes back to showing everything |
@@ -256,6 +304,7 @@ Press `Talk only` at the end of the talk row, or type `/chiikawa talk`, and the 
 | `/chiikawa look` | Shows whether the desktop meadow and colors are on |
 | `/chiikawa look day` · `/chiikawa look night` | Keeps the window in day (pink meadow, light window) or night (starry sky, dark window) whatever the app's mode. `look on` follows the app's light or dark mode |
 | `/chiikawa look on` · `/chiikawa look off` | Turns the desktop app's meadow and colors on or off, kept for later sessions. `off` clears the theme that stands, so a theme another mod set goes too |
+| `/chiikawa pictures` | Reads your picture folder (`~/.claude/chiikawa-pictures/`) again and uses it on the desktop screen. The reply says how many pictures it took and which files it left out (too large, or not readable). See [Adding your own pictures](#adding-your-own-pictures-optional) |
 | `/chiikawa clear` | Clears the finished tasks and the talk. Tasks still running and each friend's pay (the usage so far) are kept |
 | `/chiikawa clear all` | Clears every task, even those still listed as running, along with the talk and each friend's pay (the usage so far) |
 
@@ -352,8 +401,10 @@ A mod runs with your own permissions, not in a sandbox. So here is everything it
 
 - **The maker of this mod receives no data.** The mod makes no network call, has no analytics and no remote server, and runs no program. Nothing it reads leaves your machine by the mod's own doing.
 - **Held in the session's state only**: the task records (who took what, the tool target shown on the screen such as a file's name or the start of a command, and up to six lines of each report), the talk (up to 120 lines), the usage figures, the friend you picked, and whether the mode is on. The mod writes none of this to a file, and a new session starts without it. To clear it during a session, `/chiikawa clear all` clears the task records, the talk and each friend's pay at once. Other plugins in the same session can read the session's state.
-- **Kept on disk**: two things only.
+- **Your pictures**: the pictures read from your picture folder (`~/.claude/chiikawa-pictures/`) are held in the session's state and drawn on the desktop screen alone. The mod never writes to that folder or deletes from it.
+- **Kept on disk**: three things only.
   - The roles you changed and the language (the one you chose, and the one remembered from the letters you typed), in Claude Code's plugin store. They hold no text you typed. They stay until you clear them: `/chiikawa role reset` clears the roles and `/chiikawa lang auto` the language.
+  - The desktop look you chose with `/chiikawa look` (one of `on`, `off`, `day` and `night`), in the same plugin store, until you choose again.
   - Orca voice copies (`<name>.chiikawa-<character>.md`), made beside your spec files only if you use Orca with `orcaVoice` on. A copy holds the whole spec, and nothing filters out personal information. The mod never deletes a copy: it stays until you delete the file.
 - **What does reach the model and other AI workers**
   - The text the mod adds (the section in the system prompt, the notes beside a prompt, the cast block at the end of a subagent's instructions, the one line after a tool's result) reaches the model the same way your prompt does.
@@ -367,10 +418,11 @@ A mod runs with your own permissions, not in a sandbox. So here is everything it
   - The name and target of the main session's own tool calls, and the tokens each turn used. Of a Bash command it looks at whether `fleet-run` is in it, and only then reads the command to find the launch and its paths.
   - Of a prompt you type, only whether it starts with `/` and, to tell the language, how many Hangul and kana letters it has (in its first 2,000 characters). The text itself is not kept.
   - The session's usage figures (context, plan limits, cost), the list of running subagents, the list of open panes, and the list of Claude Code settings (of which it uses the theme's name and the language).
-  - Of the environment, four variables: `HOME` (to resolve `~` in a command) and `LANG`, `LC_ALL` and `LC_MESSAGES` (to tell the language). It reads no credential or key.
-  - Files, only around an Orca `fleet-run`, and each of them whole: the spec (`--spec`, only with `orcaVoice` on), the result (`--out`), the `<out>.meta.json` beside it, and a file already standing where a voice copy would go (its text is compared so that it is not written over). A file over 4 MiB is not read (Claude Code refuses such a read). Of the result, only the first six lines that say something are kept, each cut to 160 characters, to show as the report. The spec's text goes into the voice copy and is not kept anywhere else.
+  - Of the environment, four variables: `HOME` (to resolve `~` in a command, and to find your picture folder) and `LANG`, `LC_ALL` and `LC_MESSAGES` (to tell the language). It reads no credential or key.
+  - Your picture folder `~/.claude/chiikawa-pictures/` and the `band/` folder inside it, when a session starts and when you type `/chiikawa pictures`: it lists the files and reads only the picture files whose names fit (gif, png, webp, jpg, jpeg). A file over 48 KB (10 KB in `band/`) is not read. `HOME` tells it where the folder is.
+  - Other files, only around an Orca `fleet-run`, and each of them whole: the spec (`--spec`, only with `orcaVoice` on), the result (`--out`), the `<out>.meta.json` beside it, and a file already standing where a voice copy would go (its text is compared so that it is not written over). A file over 4 MiB is not read (Claude Code refuses such a read). Of the result, only the first six lines that say something are kept, each cut to 160 characters, to show as the report. The spec's text goes into the voice copy and is not kept anywhere else.
 - **Writes one kind of file.** Beside an Orca `fleet-run` spec, a copy named `<name>.chiikawa-<character>.md` with the character's voice instructions added at its end (the character part is an id such as `rakko`). The original is left alone. The mod looks first, and does not write where it finds a file. After writing, it reads the copy back, and if the text is not what it wrote, it does not use that copy: the worker runs from the original spec. One case it cannot rule out: a file another program creates under that very name in the instant between the look and the write would be written over. Nothing is written with `orcaVoice` off.
-- **Keeps two settings** in Claude Code's plugin store (`$.store`): the roles you changed (`roles`) and the language (`lang`: the one chosen with `/chiikawa lang`, and the one remembered from the letters you typed). Everything else (task records, the talk, usage figures, whether the mode is on) lives in the session's state alone.
+- **Keeps three settings** in Claude Code's plugin store (`$.store`): the roles you changed (`roles`), the language (`lang`: the one chosen with `/chiikawa lang`, and the one remembered from the letters you typed), and the desktop look (`look`). Everything else (task records, the talk, usage figures, whether the mode is on, the pictures read) lives in the session's state alone.
 - **Changes**
   - It adds one section, "Chiikawa mode", to the system prompt (`prompt.compose`).
   - It adds notes beside a prompt you type (`prompt.submit`): the same briefing beside the first prompt of a session, the one after a compaction and the one after the language changes; one line, once, to drop the voice after the mod is turned off while a briefing still stands in the conversation (beside the next prompt; also when the language had just changed, and when the mod was turned off while the prompt carrying the briefing was still being sent). After a compaction, and in the new session a `/clear` starts, no briefing stands, so no such line is added; a `[Chiikawa pick]` line when you have picked a friend; a `[Chiikawa roles]` line when you have changed the roles. The prompt's own text is not changed.
@@ -378,7 +430,8 @@ A mod runs with your own permissions, not in a sandbox. So here is everything it
   - It adds one `[Chiikawa cast]` line, naming who took the task, after an Agent tool's result (`tool.call`).
   - It rewrites a Bash command in one case only: the `--spec` path of a `fleet-run` is pointed at the copy above (`orcaVoice`). One line naming who took the task follows that result too. Every other tool input goes through as it is.
   - These markers follow the language. In Korean they are `[치이카와 배역]`, `[치이카와 지명]` and `[치이카와 역할]`, and in Japanese `[ちいかわ配役]`, `[ちいかわ指名]` and `[ちいかわ役割]`.
-  - On the screen it draws the spinner text, the line after a turn, the band above the prompt and its own pane (`ui.render`), shows toasts, and opens its pane.
+  - On the screen it draws the spinner text, the line after a turn, the band above the prompt and its own pane (`ui.render`), shows toasts, and opens and closes its pane.
+  - In the Code tab of the desktop app (a local session) it sets the app's colors and the meadow backdrop (`theme.set`). `/chiikawa look off` clears the theme that stands (`theme.clear`). With the `desktopLook` setting off, it sets nothing as a session starts.
   - Its other hooks (`session.start`, `session.compact`, `turn.complete`, `ui.close`) only observe. From the start of a session a timer checks on the tasks every 2 seconds and, with movement on, another moves the drawings every half second (only while a friend is at work).
 - **It takes no permission decision.** It never allows or denies a tool call; it only looks at the result.
 - **It hooks no setting as it is made.** There is no `config.set` hook: the theme's name and the language are read when a prompt is sent and when `/chiikawa` is run.
