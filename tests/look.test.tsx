@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SCENE } from '../hooks/look'
+import { SCENE, SCENES } from '../hooks/look'
 
 const KO = { options: { language: 'ko' } } as const
 const DESKTOP_START = { cwd: '/w', surface: 'desktop', isInteractive: true } as const
@@ -135,4 +135,62 @@ test('/chiikawa look night keeps the window dark with the night meadow, and day 
 
   expect(await drawn.find({ type: 'Svg' })).toBeDefined()
   await drawn.unmount()
+})
+
+test('each meadow is a scene the desktop app moves: only the elements it draws, a style that asks nothing of the window, and nothing fetched', KO, async () => {
+  // What the app lets a moving scene hold, as its own check reads it: any other element, or a style it does not take, and the
+  // scene is drawn once and stands still.
+  const ELEMENTS = new Set('animate animateMotion animateTransform set circle clipPath defs desc ellipse feBlend feComposite feDropShadow feFlood feGaussianBlur feMerge feMergeNode feOffset filter g line linearGradient marker mask mpath path pattern polygon polyline radialGradient rect stop style svg symbol text textPath title tspan use'.split(' '))
+  const FUNCTIONS = new Set(
+    'color.color-mix.hsl.hsla.hwb.lab.lch.light-dark.oklab.oklch.rgb.rgba.abs.acos.asin.atan.atan2.calc.clamp.cos.exp.hypot.log.max.min.mod.pow.rem.round.sign.sin.sqrt.tan.var.matrix.matrix3d.perspective.rotate.rotate3d.rotatex.rotatey.rotatez.scale.scale3d.scalex.scaley.scalez.skew.skewx.skewy.translate.translate3d.translatex.translatey.translatez.cubic-bezier.linear.steps.blur.drop-shadow.grayscale.hue-rotate.invert.opacity.saturate.sepia.is.not.nth-child.nth-last-child.nth-last-of-type.nth-of-type.where'.split(
+      '.',
+    ),
+  )
+  const RULES = new Set(['keyframes', 'layer', 'media', 'supports'])
+  const ASKED = /\(\s*(?:prefers-reduced-motion(?:\s*:\s*(?:reduce|no-preference))?|prefers-color-scheme(?:\s*:\s*(?:dark|light))?)\s*\)/gi
+  /** Why the app would not take a style or an attribute's value, or nothing. */
+  const refused = (text: string): string | undefined => {
+    if (text.includes('\\')) return 'a backslash'
+    if (/(?:\d|\.)(?:[dsl]?v(?:w|h|i|b|min|max)|cq(?:w|h|i|b|min|max))(?![a-z0-9_-])/i.test(text)) return 'a length of the window'
+    if (/shape-rendering|vector-effect/i.test(text)) return 'shape-rendering or vector-effect'
+    for (const [, asked = '', opens] of text.matchAll(/@media([^{]*)(\{|$)/gi)) {
+      if (opens !== '{' || !/^(?:\s|,|all|and|not|only|or|screen)*$/i.test(asked.replaceAll(ASKED, ''))) return `@media${asked}`
+    }
+    const bare = text.replaceAll(/[\s\p{Cc}]/gu, '').toLowerCase()
+
+    if (bare.includes('data:')) return 'data:'
+    if (text.replaceAll(/url\(#[A-Za-z_][\w.:-]*\)/gi, '').replaceAll(/[\s\p{Cc}]/gu, '').toLowerCase().includes('url(')) return 'a url that is not a part of the scene'
+    for (const [, name = ''] of text.matchAll(/([^\s()[\]{}<>;:,'"`=+*/!@#$%^&|~?]{0,64})\(/g)) {
+      if (name !== '' && name.toLowerCase() !== 'url' && !FUNCTIONS.has(name.toLowerCase())) return `${name}()`
+    }
+    for (const [, name = ''] of text.matchAll(/@([^\s{};("'/]*)/g)) if (!RULES.has(name.toLowerCase())) return `@${name}`
+
+    return undefined
+  }
+
+  expect(Object.keys(SCENES)).toEqual(['meadow', 'meadow-day', 'meadow-night'])
+  for (const [name, scene] of Object.entries(SCENES)) {
+    const problems: string[] = []
+
+    if (!scene.startsWith('<svg xmlns="http://www.w3.org/2000/svg"') || /<!DOCTYPE|<!--|<\?/i.test(scene)) problems.push('not one plain svg')
+    for (const [, element = ''] of scene.matchAll(/<([A-Za-z][\w:-]*)/g)) if (!ELEMENTS.has(element)) problems.push(`<${element}>`)
+    for (const [, attribute = '', value = ''] of scene.matchAll(/\s([A-Za-z_:][\w:.-]*)="([^"]*)"/g)) {
+      const why = refused(value)
+
+      if (/^on/i.test(attribute) || /href$/i.test(attribute)) problems.push(attribute)
+      if (why !== undefined) problems.push(`${attribute}: ${why}`)
+    }
+    const styles = [...scene.matchAll(/<style>([\s\S]*?)<\/style>/g)].map(([, text = '']) => text)
+
+    for (const style of styles) {
+      const why = refused(style)
+
+      if (why !== undefined) problems.push(`style: ${why}`)
+    }
+    // It moves, and still follows the app's mode and the person's wish for less motion.
+    if (!styles.some(style => /animation|@keyframes/i.test(style))) problems.push('nothing moves')
+    if (!styles.some(style => style.includes('prefers-reduced-motion'))) problems.push('no rule for less motion')
+    expect(`${name} ${[...new Set(problems)].join(', ')}`).toBe(`${name} `)
+  }
+  expect(SCENES.meadow).toContain('prefers-color-scheme')
 })

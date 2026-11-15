@@ -1764,6 +1764,55 @@ test('a shell told to leave at the first command that fails may be gone past any
   }
 })
 
+test('a redirection on the `done` of a loop read over again for each word may fail the loop as on any other block: told to leave at a failure, zsh leaves there, and the launch after it is not sure to any shell', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string, tool?: 'zsh' | 'bash'): string => findFleetRuns(command, undefined, tool).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'}${run.isBackground ? ' behind' : ''}`).join()
+
+  for (const tool of [undefined, 'zsh', 'bash'] as const) {
+    for (const loop of ['for i in a; do :; done >/nonexist/x', 'for i in a b; do :; done >/nonexist/x', 'for i in a; do :; done 2>/nonexist/x', 'for i in a; do :; done </nonexist/x', 'for i in a; do :; done 3</nonexist/x', 'for i in a\ndo true\ndone >/nonexist/x', 'for i in a; do true; done >/nonexist/x']) {
+      expect(`${tool} ${loop} ${read(`set -e; ${loop}; ${F}`, tool)}`).toBe(`${tool} ${loop} maybe`)
+    }
+    expect(`${tool} ${read(`set -e; for i in a; do :; done >/nonexist/x; ${F} &`, tool)}`).toBe(`${tool} maybe behind`)
+    expect(`${tool} ${read(`zsh -c 'set -e; for i in a; do :; done >/nonexist/x; ${F}'`, tool)}`).toBe(`${tool} maybe`)
+    // The other blocks, as before.
+    for (const block of ['{ :; } >/nonexist/x', 'if :; then :; fi >/nonexist/x', 'while false; do :; done >/nonexist/x']) expect(`${tool} ${block} ${read(`set -e; ${block}; ${F}`, tool)}`).toBe(`${tool} ${block} maybe`)
+    // Not told to leave, every shell goes on past the loop; and with no redirection on it the loop does not fail.
+    expect(`${tool} ${read(`for i in a; do :; done >/nonexist/x; ${F}`, tool)}`).toBe(`${tool} sure`)
+    expect(`${tool} ${read(`set -e; for i in a; do :; done; ${F}`, tool)}`).toBe(`${tool} sure`)
+    // Where no failing ends the shell, the loop failing at its `done` ends nothing: before an `&&` or `||`, piped on, left running behind,
+    // or in a condition.
+    for (const loop of ['for i in a; do :; done </nonexist/x || true', 'for i in a; do :; done </nonexist/x && :', 'for i in a; do :; done </nonexist/x | true', 'for i in a; do :; done </nonexist/x & true', 'if for i in a; do :; done </nonexist/x; then :; fi']) {
+      expect(`${tool} ${loop} ${read(`set -e; ${loop}; ${F}`, tool)}`).toBe(`${tool} ${loop} sure`)
+    }
+  }
+})
+
+test('a shell that reads as POSIX says leaves at a redirection that cannot be opened on one of its special commands, told to leave at a failure or not: in a script handed to `sh`, or after `set -o posix`, a launch after one is not sure', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string, tool?: 'zsh' | 'bash'): string => findFleetRuns(command, undefined, tool).map(run => (run.isMaybe === true ? 'maybe' : 'sure')).join()
+  const specials = [': >/nonexist/x', 'export A >/nonexist/x', 'unset A >/nonexist/x', 'eval : >/nonexist/x', 'set -- a >/nonexist/x', 'readonly B >/nonexist/x', 'shift 0 >/nonexist/x', 'trap : EXIT >/nonexist/x', 'times >/nonexist/x', '. /dev/null >/nonexist/x', 'A=1 : >/nonexist/x', 'exec >/nonexist/x', 'exec 3>/nonexist/x', '{ : >/nonexist/x; }']
+
+  for (const tool of [undefined, 'zsh', 'bash'] as const) {
+    // macOS's sh, and bash told `--posix`, run nothing after any of these.
+    for (const special of specials) {
+      expect(`${tool} sh ${special} ${read(`sh -c '${special}; ${F}'`, tool)}`).toBe(`${tool} sh ${special} maybe`)
+      expect(`${tool} posix ${special} ${read(`set -o posix; ${special}; ${F}`, tool)}`).toBe(`${tool} posix ${special} maybe`)
+    }
+    // They go on past a command that is none of those, past one behind `command`, past one whose failing is asked after, and past one
+    // run in a shell of its own.
+    for (const plain of ['echo >/nonexist/x', 'true >/nonexist/x', '>/nonexist/x', 'A=1 >/nonexist/x', 'command : >/nonexist/x', ': >/nonexist/x || true', 'if : >/nonexist/x; then :; fi', '( : >/nonexist/x )', ': >/nonexist/x | cat', ': >/nonexist/x & wait', ':', 'export A=1']) {
+      expect(`${tool} sh ${plain} ${read(`sh -c '${plain}; ${F}'`, tool)}`).toBe(`${tool} sh ${plain} sure`)
+    }
+    // bash and zsh as they are go on past every one, handed the script or reading it themselves. What `eval` and `.` run is not
+    // followed here, in any shell, nor what `set` with words, `trap` or `exec` leave behind: nothing after them is sure.
+    for (const special of specials.filter(one => !/^(?:eval|\.|set|trap|exec) /.test(one))) {
+      expect(`${tool} bash ${special} ${read(`bash -c '${special}; ${F}'`, tool)}`).toBe(`${tool} bash ${special} sure`)
+      expect(`${tool} zsh ${special} ${read(`zsh -c '${special}; ${F}'`, tool)}`).toBe(`${tool} zsh ${special} sure`)
+      expect(`${tool} ${special} ${read(`${special}; ${F}`, tool)}`).toBe(`${tool} ${special} sure`)
+    }
+  }
+})
+
 test('a shell told to leave at the first command that fails may be gone past any command: a launch after one is not sure', () => {
   const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
   const maybe = (command: string): string => findFleetRuns(command).map(run => (run.isMaybe === true ? 'maybe' : 'sure')).join()

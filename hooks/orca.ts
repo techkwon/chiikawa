@@ -81,7 +81,15 @@ type Shell = {
   budget: { left: number }
   /** Whether the shell is known to be zsh: where it and bash read a command apart, it is read as zsh does. Not known, as is safe for both. */
   isZsh?: boolean
+  /**
+   * Whether the shell is known to read as POSIX says: `sh`, or one told `set -o posix`. Such a shell leaves at a redirection that
+   * cannot be opened on one of its special commands, told to leave at a failure or not.
+   */
+  isPosix?: boolean
 }
+
+/** The commands POSIX sets apart: a shell reading as it says leaves where one of them fails by its redirection. */
+const SPECIALS = new Set([':', '.', 'break', 'continue', 'eval', 'exec', 'exit', 'export', 'readonly', 'return', 'set', 'shift', 'times', 'trap', 'unset', 'source'])
 
 /** A path that goes into a command as it is, with nothing for a shell to read into it: letters and digits of any script, and the few signs a path is written with. */
 const PLAIN = /^[\p{L}\p{N}\p{M}_@%+=:,./~-]+$/u
@@ -1229,6 +1237,11 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
       shell.isWhole &&= inner.isWhole
       for (const name of inner.sealed) shell.sealed.add(name)
       forget(shell)
+      // A redirection on the loop's `done` that cannot be opened fails the loop: told to leave at a failure, zsh leaves there, and bash
+      // and sh go on. The `done` is passed over with the loop, so it is asked here, save where no failing ends the shell, as for a
+      // parenthesis: in a condition, before an `&&` or `||`, or piped on or left running behind.
+      const doneAfter = statements[loop.end]?.after ?? ''
+      if (statements[loop.end]?.isRedirected === true && (wasStrict || shell.isStrict) && !UNWAITED.has(doneAfter) && doneAfter !== '&&' && doneAfter !== '||' && asked === 0) shell.isLeft = true
       skip = loop.end + 1
       // The loop's first line and its `done` may each open or close a shell of their own around it.
       for (const edge of [after, statements[loop.end]?.after]) {
@@ -1246,6 +1259,8 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
     let isNegated = false
     /** Whether the statement only tells the shell how to go on, as `set` does: it does not fail. */
     let isTelling = false
+    /** Whether the statement's command is one of those POSIX sets apart, run by this shell itself. */
+    let isSpecial = false
     let isHeader = false
 
     // A function may stand for any command, and the shell calls some by itself, as zsh calls `chpwd` after a `cd`: past a definition, as past what is odd, nothing is sure.
@@ -1379,6 +1394,9 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
         const lent = words.slice(first, at).map(word => assigned(word)?.[1] ?? '')
         const isDetached = wrappers.includes('nohup')
 
+        // Behind `command` or `builtin` it is a command like any other; `exec` is one of them itself, whatever it runs.
+        isSpecial = wrappers[0] === 'exec' || (wrappers.length === 0 && SPECIALS.has(name ?? ''))
+
         // A variable a shell is ruled by, given to a command, rules the shell that command starts.
         if (lent.some(one => RULING.has(one))) lose(shell)
         // fleet-run is a Python script: it may be run by its interpreter, given its path.
@@ -1414,6 +1432,9 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
             const flag = bareOf(arg) ?? ''
             const isNamed = /^[-+]o$/.test(bareOf(args[place - 1]) ?? '') && flag === 'errexit'
 
+            // Told to read as POSIX says, wherever and however: from then on it may.
+            if (flag === 'posix') shell.isPosix = true
+
             // Told to leave in an element of a pipeline that is not its last, or left running behind, a shell of its own is told, and not this one.
             // The last element zsh runs in this shell.
             if ((/^-[A-Za-z]+$/.test(flag) && flag.includes('e')) || (isNamed && bareOf(args[place - 1]) === '-o')) shell.isStrict ||= !UNWAITED.has(after)
@@ -1429,7 +1450,7 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
         // The shell a script is handed to has this one's home directory only while this one has the one it began with, and is given no other.
         if (handed !== undefined && text !== undefined) {
           // A script handed to zsh is read as zsh reads it only where this shell is known: one handed to any other is read as is safe for all.
-          const inner = runsIn(text.text, shell.vars.get('HOME') === home && !lent.includes('HOME') ? home : undefined, shell.isLost || !handed.isPlain, shell.budget, shell.isZsh === true && name === 'zsh')
+          const inner = runsIn(text.text, shell.vars.get('HOME') === home && !lent.includes('HOME') ? home : undefined, shell.isLost || !handed.isPlain, shell.budget, shell.isZsh === true && name === 'zsh', name === 'sh')
 
           // Piped on, a script of more than one statement may be ended at what it writes before it reaches a launch.
           const isPiped = (after === '|' || after === '|&') && (statementsOf(text.text)?.filter(one => one.words.length > 0).length ?? 2) > 1
@@ -1480,7 +1501,10 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
     // `x=1 > /no/such/file` and a bare `> /no/such/file` each fail, in bash, zsh and sh alike.
     const mayFail = (first < words.length ? !isTelling || isPipedOn : words.length > 0 && isPipedOn) || isRedirected
 
-    if (wasStrict && mayFail && !isTaken && !isAsked && !UNWAITED.has(after)) shell.isLeft = true
+    // `sh -c ': > /no/such/file; L'` runs no `L`, in macOS's sh as in bash told to read as POSIX says; bash and zsh as they are go on.
+    const isLeaving = shell.isPosix === true && isSpecial && isRedirected
+
+    if (((wasStrict && mayFail) || isLeaving) && !isTaken && !isAsked && !UNWAITED.has(after)) shell.isLeft = true
     isPipedOn = after === '|' || after === '|&' ? isPipedOn || isRedirected || !(first < words.length && isTelling) : false
     isTurned = (after === '|' || after === '|&') && isBehind
     isBegun ||= words.length > 0
@@ -1490,10 +1514,11 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
 }
 
 /** The launches a script makes, read by a shell that begins with this home directory; `isLost` where how that shell reads is not sure. */
-const runsIn = (script: string, home: string | undefined, isLost: boolean, budget: { left: number } = { left: LOOP_BUDGET }, isZsh = false): FleetRun[] => {
+const runsIn = (script: string, home: string | undefined, isLost: boolean, budget: { left: number } = { left: LOOP_BUDGET }, isZsh = false, isPosix = false): FleetRun[] => {
   const shell: Shell = {
     budget,
     isZsh,
+    isPosix,
     vars: new Map(home === undefined ? [] : [['HOME', home]]),
     sealed: new Set(),
     // `IFS` named anywhere may be `IFS` assigned: what a variable written bare holds may then be parted at any character.

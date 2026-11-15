@@ -119,14 +119,16 @@ const daisy = (x: number, y: number, h: number, scale: number, tone: number, sal
 /** [x, y, height, scale, tone or -1 for a clover, 1 when a narrow window leaves it out] */
 type Plant = readonly [number, number, number, number, number, number?]
 
-const plant = ([x, y, h, scale, tone, inner]: Plant, index: number): string =>
-  tone < 0 ? clover(x, y, h, scale, x + index, inner ? ' inner' : '') : daisy(x, y, h, scale, tone, x + index, inner ? ' inner' : '')
+const plant = ([x, y, h, scale, tone]: Plant, index: number): string => (tone < 0 ? clover(x, y, h, scale, x + index) : daisy(x, y, h, scale, tone, x + index))
 
-/** The plants of a patch, the far ones first so the near ones stand before them. */
-const patch = (plants: readonly Plant[]): string =>
+/**
+ * The plants of a patch, the far ones first so the near ones stand before them: those a narrow window keeps, or those it leaves
+ * out. Each is drawn as it stands among them all, whichever are asked for.
+ */
+const patch = (plants: readonly Plant[], isInner = false): string =>
   [...plants]
     .sort((one, other) => one[1] - other[1])
-    .map(plant)
+    .map((one, index) => ((one[5] === 1) === isInner ? plant(one, index) : ''))
     .join('')
 
 const WEST_PLANTS: readonly Plant[] = [
@@ -227,7 +229,7 @@ ${blossom(30, 344, 30, 8)}${blossom(108, 292, 21, 30)}${blossom(14, 216, 19, -12
 <path class="tkl" d="M32 520Q28 600 22 684M48 544Q50 622 58 704M40 600Q40 664 38 730M24 716Q14 748 -8 764"/>`
 
 /** The cottage, drawn about the left foot of its gable wall. */
-const COTTAGE = `<g transform="translate(1466 598)"><g filter="url(#wob)">
+const COTTAGE = `<g transform="translate(1466 598)"><g>
 <path class="chim" d="M100 -98h16v30h-16Z"/><path class="chim" d="M96 -104h24v8h-24Z"/>
 <path class="wall2" d="M62 -42H186V0H62Z"/>
 <path class="roof" d="M30 -82L180 -80L202 -38L68 -38Z"/>
@@ -241,7 +243,7 @@ const COTTAGE = `<g transform="translate(1466 598)"><g filter="url(#wob)">
 
 /** How the meadow looks at night: laid over the day rules. */
 const NIGHT = `.sk0{stop-color:#1b2462}.sk1{stop-color:#232e73}.sk2{stop-color:#2e3d84}
-.wash{opacity:.05}.grain{opacity:.5}
+.wash{opacity:.05}
 .c0{stop-color:#46529c}.c1{stop-color:#353f86}.cd{stroke:#262f6c}.cdl{stroke:#2c3678}
 .h0{fill:#2c5373;stroke:#22425f}.h1{fill:#294b6d;stroke:#22425f}
 .m0{stop-color:#2f6c6c}.m1{stop-color:#2d6664}.m2{stop-color:#2a5d5e}.md{stroke:#22504f}.mdl{stroke:#255553}.mo{stop-color:#327170}.mnd{stroke:#22504f}
@@ -268,30 +270,18 @@ const NIGHT_RULES: Record<PaintTime, string> = {
 }
 
 /**
- * How far each side comes in as the picture's own box narrows, so a tall
- * window keeps its tree and its cottage (and loses the plants nearest the
- * middle), and how far the top and the foot come in on a wide, short one.
+ * One layer of the picture: the whole drawing's own box laid over the whole window, held to one side of it. The desktop app moves a
+ * scene only where its style asks nothing of the window's shape, so nothing here does: a window narrower than the drawing cuts each
+ * layer at the side away from the one it is held to, and a wider one at the top or the foot. So a tall window keeps its tree at its
+ * left edge and its cottage at its right, and a wide, short one its clouds at the top and its flowers at the foot.
  */
-const FIT = [
-  ...(
-    [
-      ['3/2', 60],
-      ['27/20', 135],
-      ['6/5', 210],
-      ['21/20', 285],
-      ['9/10', 360],
-      ['3/4', 425],
-      ['3/5', 465],
-    ] as const
-  ).map(([ratio, across]) => `@media (max-aspect-ratio:${ratio}){.west{transform:translateX(${across}px)}.east{transform:translateX(-${across}px)}}`),
-  '@media (max-aspect-ratio:6/5){.inner{display:none}}',
-  ...(
-    [
-      ['2/1', 90],
-      ['5/2', 170],
-    ] as const
-  ).map(([ratio, down]) => `@media (min-aspect-ratio:${ratio}){.top{transform:translateY(${down}px)}.foot{transform:translateY(-${down}px)}}`),
-].join('\n')
+const layer = (hold: string, drawn: string): string => `<svg viewBox="0 0 1600 1000" width="100%" height="100%" preserveAspectRatio="${hold} slice">${drawn}</svg>`
+
+/**
+ * The plants nearest the middle, each side's held to the other side of the window: as the window narrows they go out at the edge
+ * their own side keeps to, and a window less than six fifths as wide as it is tall has none of them.
+ */
+const INNER = `${layer('xMaxYMax', `${tuft(402, 968, 22, 9)}${patch(WEST_PLANTS, true)}`)}${layer('xMinYMax', patch(EAST_PLANTS, true))}`
 
 /**
  * The painted meadow. What there is to look at keeps to the two sides, the
@@ -299,11 +289,11 @@ const FIT = [
  * cottage, its path and the bush at the right, clouds (and a moon) above,
  * clover and daisies below. The middle is sky over plain grass.
  */
-export const paintedSceneAt = (time: PaintTime): string => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice">
+export const paintedSceneAt = (time: PaintTime): string => `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
 <style>
 path,circle,ellipse{stroke-linejoin:round;stroke-linecap:round}
 .sk0{stop-color:#a6cdef}.sk1{stop-color:#bbdaf3}.sk2{stop-color:#d6eaf6}
-.wash{opacity:.34}.grain{opacity:.42}
+.wash{opacity:.34}
 .c0{stop-color:#fffaf0}.c1{stop-color:#fce1d8}.cd{stroke:#e2c5bc;stroke-width:1.8}.cdl{fill:none;stroke:#efd3c9;stroke-width:1.6}
 .drift{animation:drift ease-in-out infinite alternate}
 .h0{fill:#bfe0c6;stroke:#98c7a6;stroke-width:1.6}.h1{fill:#afd8b7;stroke:#98c7a6;stroke-width:1.6}
@@ -330,7 +320,6 @@ path,circle,ellipse{stroke-linejoin:round;stroke-linecap:round}
 .moon{display:none;fill:#f9e9a4;stroke:#d8bd68;stroke-width:1.8}.halo{display:none;animation:glow 8s ease-in-out infinite}
 .fire{display:none;fill:#ffeaa0;opacity:.8;animation:fire ease-in-out infinite}.fg{opacity:.22}
 ${NIGHT_RULES[time]}
-${FIT}
 @keyframes drift{from{transform:translateX(-26px)}to{transform:translateX(34px)}}
 @keyframes sway{0%,100%{transform:rotate(-3deg)}50%{transform:rotate(4deg)}}
 @keyframes sway2{0%,100%{transform:rotate(-.9deg)}50%{transform:rotate(1.1deg)}}
@@ -351,40 +340,30 @@ ${FIT}
 <radialGradient id="wash"><stop offset="0" stop-color="#fff" stop-opacity=".9"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
 <radialGradient id="lamp"><stop offset="0" stop-color="#ffd972" stop-opacity=".6"/><stop offset=".4" stop-color="#ffd972" stop-opacity=".2"/><stop offset="1" stop-color="#ffd972" stop-opacity="0"/></radialGradient>
 <radialGradient id="halo"><stop offset=".25" stop-color="#f9e9a4" stop-opacity=".34"/><stop offset="1" stop-color="#f9e9a4" stop-opacity="0"/></radialGradient>
-<filter id="grain" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".85" numOctaves="1" seed="7"/><feColorMatrix values="0 0 0 0 .36 0 0 0 0 .31 0 0 0 0 .3 .7 .5 0 0 -.44"/></filter>
-<filter id="wob" x="-5%" y="-5%" width="110%" height="110%"><feTurbulence type="fractalNoise" baseFrequency=".05" numOctaves="1" seed="3"/><feDisplacementMap in="SourceGraphic" scale="2.6" xChannelSelector="R" yChannelSelector="G"/></filter>
 </defs>
-<rect width="1600" height="1000" fill="url(#sky)"/>
+${layer('xMidYMid', `<rect width="1600" height="1000" fill="url(#sky)"/>
 <g class="wash"><ellipse cx="420" cy="170" rx="330" ry="130" fill="url(#wash)"/><ellipse cx="1010" cy="330" rx="420" ry="150" fill="url(#wash)"/><ellipse cx="760" cy="520" rx="520" ry="110" fill="url(#wash)"/><ellipse cx="1240" cy="60" rx="260" ry="90" fill="url(#wash)"/></g>
-${STARS}
-<g class="top">
-<g class="east"><circle class="halo" cx="1385" cy="96" r="120" fill="url(#halo)"/><path class="moon" transform="translate(1385 96)" d="M8 -33A34 34 0 1 1 -33 8A29.5 29.5 0 0 0 8 -33Z"/>${cloud(CLOUD_EAST, 3, 'M1420 180q26 -22 58 -10M1500 160q34 -16 62 6M1330 252q30 -14 58 0M1450 232q44 -12 84 4M1570 210q30 -8 50 10', 78, 30)}</g>
-<g class="west">${cloud(CLOUD_WEST, 5, 'M60 96q26 -20 54 -6M150 62q32 -14 56 8M40 132q36 -12 70 0M170 118q40 -12 72 4', 64, 12)}</g>
-</g>
-<path class="h0" d="M40 644C140 592 262 566 382 596S566 634 664 644Z"/><path class="h0" d="M800 644C900 602 1010 568 1112 570S1304 602 1404 644Z"/><path class="h1" d="M396 646C478 612 560 598 642 602S784 626 846 644Z"/>
+${STARS}`)}
+${layer('xMaxYMin', `<circle class="halo" cx="1385" cy="96" r="120" fill="url(#halo)"/><path class="moon" transform="translate(1385 96)" d="M8 -33A34 34 0 1 1 -33 8A29.5 29.5 0 0 0 8 -33Z"/>${cloud(CLOUD_EAST, 3, 'M1420 180q26 -22 58 -10M1500 160q34 -16 62 6M1330 252q30 -14 58 0M1450 232q44 -12 84 4M1570 210q30 -8 50 10', 78, 30)}`)}
+${layer('xMinYMin', `${cloud(CLOUD_WEST, 5, 'M60 96q26 -20 54 -6M150 62q32 -14 56 8M40 132q36 -12 70 0M170 118q40 -12 72 4', 64, 12)}`)}
+${layer('xMidYMid', `<path class="h0" d="M40 644C140 592 262 566 382 596S566 634 664 644Z"/><path class="h0" d="M800 644C900 602 1010 568 1112 570S1304 602 1404 644Z"/><path class="h1" d="M396 646C478 612 560 598 642 602S784 626 846 644Z"/>
 <path class="md" fill="url(#grass)" d="M-600 630C-200 612 200 642 600 634S1100 610 1400 624S1900 604 2200 612V1100H-600Z"/>
 <g class="wash"><ellipse cx="700" cy="800" rx="520" ry="130" fill="url(#wash)" opacity=".45"/><ellipse cx="330" cy="700" rx="260" ry="50" fill="url(#wash)" opacity=".35"/><ellipse cx="1080" cy="690" rx="260" ry="44" fill="url(#wash)" opacity=".35"/></g>
 <path class="mdl" d="M210 668Q420 652 640 660M930 656Q1080 646 1200 652M300 742Q380 736 450 742M1120 760Q1200 752 1270 760"/>
-${ticks(0, 380, 30, 81, (x, y) => !(x < 140 && y < 790))}${ticks(1200, 1440, 22, 85, (x, y) => x < 1700 - y * 0.4)}
-<g class="foot">${FOOT}</g>
-<g class="east">
-<path fill="url(#mound)" d="M1296 646C1380 610 1480 592 1600 594S1900 600 2200 610V730C1800 736 1450 704 1296 646Z"/><path class="mnd" d="M1296 646C1380 610 1480 592 1600 594S1900 600 2200 610"/>
+${ticks(0, 380, 30, 81, (x, y) => !(x < 140 && y < 790))}${ticks(1200, 1440, 22, 85, (x, y) => x < 1700 - y * 0.4)}`)}
+${layer('xMidYMax', FOOT)}
+${layer('xMaxYMid', `<path fill="url(#mound)" d="M1296 646C1380 610 1480 592 1600 594S1900 600 2200 610V730C1800 736 1450 704 1296 646Z"/><path class="mnd" d="M1296 646C1380 610 1480 592 1600 594S1900 600 2200 610"/>
 ${bush(1180, 644, 30, 13, 111)}${bush(1286, 640, 84, 44, 112, 12)}
 <path class="path" d="M1384 610C1450 606 1540 612 1546 634C1552 660 1470 672 1464 706C1458 742 1508 750 1500 790C1494 830 1468 846 1440 876C1400 920 1340 960 1280 1010H1450C1480 960 1530 910 1580 876C1620 850 1640 800 1600 760C1570 730 1546 730 1540 712C1528 680 1606 664 1592 628C1582 604 1450 598 1390 604Z"/>
 <g class="peb"><ellipse cx="1502" cy="640" rx="5" ry="2"/><ellipse cx="1528" cy="672" rx="4" ry="1.8"/><ellipse cx="1500" cy="722" rx="5" ry="2.2"/><ellipse cx="1548" cy="776" rx="6" ry="2.6"/><ellipse cx="1522" cy="826" rx="5" ry="2.4"/><ellipse cx="1560" cy="846" rx="4" ry="2"/><ellipse cx="1486" cy="884" rx="6" ry="2.8"/><ellipse cx="1436" cy="930" rx="6" ry="3"/><ellipse cx="1470" cy="962" rx="5" ry="2.6"/><ellipse cx="1388" cy="980" rx="7" ry="3"/></g>
 ${bush(1404, 614, 42, 36, 113, 5)}${bush(1448, 608, 26, 26, 114, 7, 'bp')}${bush(1680, 604, 44, 34, 115, 4)}
 ${COTTAGE}
 ${bush(1640, 612, 34, 22, 116, 3)}
-${tufts(CORNER_TUFTS)}${patch(CORNER_PLANTS)}${fireflies(1260, 51)}
-</g>
-<g class="west">
-${bush(88, 648, 64, 50, 117, 16)}${bush(190, 672, 34, 17, 118, 3)}
+${tufts(CORNER_TUFTS)}${patch(CORNER_PLANTS)}${fireflies(1260, 51)}`)}
+${layer('xMinYMid', `${bush(88, 648, 64, 50, 117, 16)}${bush(190, 672, 34, 17, 118, 3)}
 ${TREE}
-${PETALS}
-</g>
-<g class="foot">
-<g class="west">${tufts(WEST_TUFTS)}${tuft(402, 968, 22, 9, ' inner')}${patch(WEST_PLANTS)}${butterfly(236, 772, 0, 17)}${fireflies(20, 41)}</g>
-<g class="east">${tufts(EAST_TUFTS)}${patch(EAST_PLANTS)}${butterfly(1206, 826, 1, 21)}</g>
-</g>
-<rect class="grain" width="1600" height="1000" filter="url(#grain)"/>
+${PETALS}`)}
+${layer('xMinYMax', `${tufts(WEST_TUFTS)}${patch(WEST_PLANTS)}${butterfly(236, 772, 0, 17)}${fireflies(20, 41)}`)}
+${layer('xMaxYMax', `${tufts(EAST_TUFTS)}${patch(EAST_PLANTS)}${butterfly(1206, 826, 1, 21)}`)}
+${INNER}
 </svg>`
