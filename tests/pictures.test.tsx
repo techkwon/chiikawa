@@ -1,6 +1,8 @@
 import type { AgentSpawnInput, On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
+import { stampOf } from '../hooks/pictures'
+
 const KO = { options: { language: 'ko' } } as const
 const FOLDER = '/u/.claude/chiikawa-pictures'
 const GIF = 'R0lGODlhAQABAAAAACw='
@@ -160,4 +162,70 @@ test('with every friend\'s pictures as large as the folder takes, no desktop dra
   expect(await band.find({ key: 'send-momonga' })).toBeDefined()
   await band.unmount()
   await $.command.run({ command: 'chiikawa', args: 'demo off', ...RUN })
+})
+
+test('a desktop drawing reads the pictures once and their short stamp after that; the same pictures read again are not written again, and new ones are shown', KO, async ($, on) => {
+  const NEXT = 'R0lGODlhAgACAAAAACw='
+  const bodies = { big: GIF, small: SMALL }
+  const box = { reads: 0, stamps: 0, writes: 0 }
+
+  world(on, [{ name: 'hachiware.gif', size: 2000 }], [{ name: 'hachiware.gif', size: 3000 }], bodies)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('state.get', ($, e, next) => {
+    if (e.key === 'pictures') box.reads += 1
+    if (e.key === 'picturesAt') box.stamps += 1
+
+    return next(e)
+  })
+  on('state.set', ($, e, next) => {
+    if (e.key === 'pictures') box.writes += 1
+
+    return next(e)
+  })
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+  await $.agent.spawn(SPAWN)
+  const shows = async (drawing: { findAll: (query: { type: 'Svg' }) => Promise<readonly { props: Record<string, unknown> }[]> }, body: string): Promise<boolean> =>
+    (await drawing.findAll({ type: 'Svg' })).some(svg => String(svg.props.source).includes(`data:image/gif;base64,${body}`))
+
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'desktop', component: 'Pane', requestId: 'chiikawa', props: PANE })
+
+  expect(await shows(pane, GIF)).toBe(true)
+  // Drawn again, and drawn elsewhere, the table is not read again: only its stamp is.
+  const read = { ...box }
+
+  for (let turn = 0; turn < 5; turn += 1) await pane.redraw()
+  const band = await $.ui.mount({ plugin: 'chiikawa', surface: 'desktop', component: 'AbovePrompt', props: { ...BAND, isCollapsed: false } })
+  const line = await $.ui.mount({ plugin: 'chiikawa', surface: 'desktop', component: 'TurnDuration', props: { word: 'Worked', durationMs: 3000 } })
+
+  expect(await shows(pane, GIF)).toBe(true)
+  expect(await shows(band, SMALL)).toBe(true)
+  expect(await shows(line, SMALL)).toBe(true)
+  expect(box.reads).toBe(read.reads)
+  expect(box.stamps).toBeGreaterThanOrEqual(read.stamps + 7)
+  await line.unmount()
+
+  // The folder read again with the same pictures in it: nothing is written, so nothing is drawn again for it.
+  await $.command.run({ command: 'chiikawa', args: 'pictures', ...RUN })
+  expect(box.writes).toBe(read.writes)
+  expect(await shows(pane, GIF)).toBe(true)
+
+  // With another picture in it, the table is written, and the drawings that stand show the new one.
+  bodies.big = NEXT
+  await $.command.run({ command: 'chiikawa', args: 'pictures', ...RUN })
+  expect(box.writes).toBe(read.writes + 1)
+  expect(await shows(pane, NEXT)).toBe(true)
+  expect(await shows(pane, GIF)).toBe(false)
+  expect(await shows(band, SMALL)).toBe(true)
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('the stamp of the pictures is the same for the same ones and another for any other', () => {
+  const table = { hachiware: { base: 'data:image/gif;base64,AAAA', 'band-base': 'data:image/gif;base64,BBBB' }, usagi: { idle: 'data:image/gif;base64,CCCC' } }
+
+  expect(stampOf(table)).toBe(stampOf({ usagi: { ...table.usagi }, hachiware: { 'band-base': table.hachiware['band-base'], base: table.hachiware.base } }))
+  expect(stampOf({ ...table, usagi: { idle: 'data:image/gif;base64,CCCD' } })).not.toBe(stampOf(table))
+  expect(stampOf({ ...table, usagi: { done: table.usagi.idle } })).not.toBe(stampOf(table))
+  expect(stampOf({ hachiware: table.hachiware })).not.toBe(stampOf(table))
+  expect(stampOf({})).not.toBe('')
 })

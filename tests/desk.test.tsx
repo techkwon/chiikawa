@@ -115,6 +115,20 @@ test('the desktop pane draws a card only for the friends at work, with no cell-g
   await editor.unmount()
 })
 
+test('a line said while the pane shows the last ones moves no page, so the pane is drawn again for the line alone', KO, async ($, on) => {
+  const written: string[] = []
+
+  world(on)
+  on('state.set', ($, e, next) => {
+    written.push(e.key)
+
+    return next(e)
+  })
+  await handOut($, on)
+  expect(written).toContain('feed')
+  expect(written).not.toContain('talkBack')
+})
+
 test('the desktop band has a chip for the main three and each friend at work to press, who takes the next prompt, and the last line said', { options: { language: 'ko', autoOpen: false } }, async ($, on) => {
   const { opened } = world(on)
 

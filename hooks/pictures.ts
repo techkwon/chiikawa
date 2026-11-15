@@ -45,6 +45,29 @@ export const PICTURE_BYTES = 48_000
 /** What a reading found: the friends drawn from a file, and the files left out with why. */
 export type PicturesRead = { folder: string; found: MemberId[]; files: number; small: number; skipped: { file: string; why: 'large' | 'unread' }[]; table: PictureTable }
 
+/**
+ * A short stamp of a table, the same for the same pictures and another for any
+ * other: the names, each picture's length, and a sum over every character.
+ * A drawing reads this in place of the table to know whether it holds it.
+ */
+export const stampOf = (table: PictureTable): string => {
+  let sum = 5381
+  let count = 0
+
+  for (const id of Object.keys(table).sort()) {
+    const states = table[id as MemberId] ?? {}
+
+    for (const state of Object.keys(states).sort()) {
+      const text = `${id}/${state}:${states[state] ?? ''}`
+
+      for (let at = 0; at < text.length; at += 1) sum = (Math.imul(sum, 33) ^ text.charCodeAt(at)) >>> 0
+      count += text.length
+    }
+  }
+
+  return `${count}:${sum.toString(36)}`
+}
+
 /** Puts the table kept in the session's state in the module's place, for the drawing about to be made. */
 export const usePictures = (table: PictureTable | undefined): void => {
   for (const id of ORDER) delete PICTURES[id]

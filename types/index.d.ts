@@ -148,6 +148,8 @@ declare module 'claude-code' {
       frame: number
       /** The person's own pictures, as data URIs by friend and state: drawings read them here, never from the module, which the band may be drawn without. */
       pictures: PictureTable
+      /** A short stamp of those pictures, new whenever they are: a drawing reads this, and the table only when the stamp is not the one it last read the table at. */
+      picturesAt: string
       /** The hands the three lend to the main loop's own work. */
       aids: Aids
       /** Whether the pane shows the usage in full: it does until the person puts it away. */

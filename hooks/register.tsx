@@ -10,7 +10,7 @@ import { findFleetRuns, readMeta, voicedSpecPath } from './orca'
 import { clearLook, keepLook, lookKept, SCENES, sceneAsked, setLook, unpainted } from './look'
 import type { LookKept } from './look'
 import { artSource, drawDeskBand, drawDeskPane, drawDeskTurn } from './desk'
-import { bandPictureOf, loadPictures, type PicturesRead, usePictures } from './pictures'
+import { bandPictureOf, loadPictures, type PicturesRead, stampOf, usePictures } from './pictures'
 import type { Kit, Scene } from './view'
 import { AID_MS, drawBand, drawPane, lastSaid, plus, rosterLines, talkLines, usageLines, ZERO } from './view'
 import { castIn, firstLines, fleetNote, isMarked, leaderSection, memberBlock, memberNamed, namedMember, openerOf, orcaBlock, pickNote, roleNamed, roleNote, standDown, tookNote, unvoiced } from './voice'
@@ -68,6 +68,7 @@ const watched = atom({ plugin: 'chiikawa', key: 'watched' } as const, null)
 const isLight = atom({ plugin: 'chiikawa', key: 'isLight' } as const, false)
 const frame = atom({ plugin: 'chiikawa', key: 'frame' } as const, 0)
 const pictures = atom({ plugin: 'chiikawa', key: 'pictures' } as const, {})
+const picturesAt = atom({ plugin: 'chiikawa', key: 'picturesAt' } as const, '')
 const aids = atom({ plugin: 'chiikawa', key: 'aids' } as const, {})
 const isUsageOpen = atom({ plugin: 'chiikawa', key: 'isUsageOpen' } as const, true)
 const talkBack = atom({ plugin: 'chiikawa', key: 'talkBack' } as const, 0)
@@ -132,32 +133,62 @@ const tasksOf = async ($: Engine): Promise<Task[]> =>
 const aidsOf = async ($: Engine): Promise<Aids> =>
   Object.fromEntries(Object.entries(await read($, aids)).map(([id, aid]) => [id, { ...aid, what: phraseOf(aid.what), ...(aid.brief === undefined ? {} : { brief: phraseOf(aid.brief) }) }]))
 
+/** The stamp of the pictures this copy of the module holds for its drawings; none until a drawing has read them. */
+let picturesSeen: string | undefined
+
+/**
+ * Has the module hold the person's pictures for the drawing about to be made.
+ * The table is megabytes of data URIs, so a drawing reads its short stamp (and
+ * is drawn again when that changes) and the table only when the stamp is not
+ * the one this copy of the module last read it at.
+ */
+const seePictures = async ($: Engine): Promise<void> => {
+  const stamp = await read($, picturesAt)
+
+  if (stamp === picturesSeen) return
+  usePictures(await read($, pictures))
+  picturesSeen = stamp
+}
+
 /** Reads the person's picture folder and keeps what it holds in the session's state, which redraws every drawing that shows them. */
 const keepPictures = async ($: Engine): Promise<PicturesRead> => {
+  // The reading fills the module's own place: a drawing made meanwhile, or after, reads the table again.
+  picturesSeen = undefined
   const found = await loadPictures($).catch((): PicturesRead => ({ folder: '', found: [], files: 0, small: 0, skipped: [], table: {} }))
+  const stamp = stampOf(found.table)
 
-  await update($, pictures, () => found.table).catch(() => undefined)
+  picturesSeen = undefined
+  // The same pictures as before are not written again: nothing is drawn again for them.
+  if (stamp !== (await read($, picturesAt).catch(() => undefined))) {
+    await update($, pictures, () => found.table).catch(() => undefined)
+    await update($, picturesAt, () => stamp).catch(() => undefined)
+  }
 
   return found
 }
 
-const sceneOf = async ($: Engine): Promise<Scene> => ({
-  lang: await langOf($),
-  tasks: await tasksOf($),
-  now: await read($, clockNow),
-  waveAt: await read($, waveAt),
-  usage: await read($, usage),
-  leaderTokens: await read($, leaderTokens),
-  feed: await talkOf($),
-  picked: await read($, picked),
-  watched: await read($, watched),
-  aids: await aidsOf($),
-  isUsageOpen: await read($, isUsageOpen),
-  talkBack: await read($, talkBack),
-  isTalkOnly: await read($, isTalkOnly),
-  roles: await read($, roles),
-  paid: await read($, paid),
-})
+/** What the drawings are made of. Every read of one dispatch is of one moment, so they are asked for together and not one after another. */
+const sceneOf = async ($: Engine): Promise<Scene> => {
+  const [spoke, list, now, wave, figures, lead, said, chosen, seen, lent, isOpen, back, isAlone, given, costs] = await Promise.all([
+    langOf($),
+    tasksOf($),
+    read($, clockNow),
+    read($, waveAt),
+    read($, usage),
+    read($, leaderTokens),
+    talkOf($),
+    read($, picked),
+    read($, watched),
+    aidsOf($),
+    read($, isUsageOpen),
+    read($, talkBack),
+    read($, isTalkOnly),
+    read($, roles),
+    read($, paid),
+  ])
+
+  return { lang: spoke, tasks: list, now, waveAt: wave, usage: figures, leaderTokens: lead, feed: said, picked: chosen, watched: seen, aids: lent, isUsageOpen: isOpen, talkBack: back, isTalkOnly: isAlone, roles: given, paid: costs }
+}
 
 /** The surface's elements with how the drawings look just now: the theme's tones, the frame of what moves. */
 const kitOf = async ($: Engine, { Box, Text, Raster, Button }: Elements['terminal']): Promise<Kit> => ({
@@ -289,8 +320,8 @@ const tell = async ($: Engine, now: number, lines: readonly Line[]): Promise<num
 
     return [...list, ...said].slice(-FEED_KEPT)
   })
-  // A page turned back stays on the lines it was showing.
-  await update($, talkBack, back => (back > 0 ? Math.min(FEED_KEPT - 1, back + lines.length) : back))
+  // A page turned back stays on the lines it was showing. Showing the last ones, nothing is written: a write draws the pane again, changed or not.
+  if ((await read($, talkBack)) > 0) await update($, talkBack, back => (back > 0 ? Math.min(FEED_KEPT - 1, back + lines.length) : back))
 
   return last
 }
@@ -1790,7 +1821,7 @@ export const register: Register = (on, options) => {
     // On the desktop the friend's own small picture stands before the line, where the person gave one. The desktop
     // draws the picture while the turn thinks, answers or writes a step; while a step runs it draws its own line instead.
     if (e.surface === 'desktop') {
-      usePictures(await read($, pictures))
+      await seePictures($)
       const face = bandPictureOf(who, 'working')
 
       if (face !== undefined) {
@@ -1812,7 +1843,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
     if (e.surface === 'desktop') {
       if (!(await read($, isOn))) return next(e)
-      usePictures(await read($, pictures))
+      await seePictures($)
       const { Box, Text, Button, Svg } = $.ui.resolve(e)
 
       return drawDeskTurn({ Box, Text, Button, Svg, isAnimated }, await langOf($), e.props.durationMs)
@@ -1838,7 +1869,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (isBandShown && e.surface === 'desktop' && !e.props.hasSurvey && (await read($, isOn))) {
-      usePictures(await read($, pictures))
+      await seePictures($)
       const scene = await sceneOf($)
       const { Box, Text, Button, Svg } = $.ui.resolve(e)
 
@@ -1871,7 +1902,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    if (e.surface === 'desktop') usePictures(await read($, pictures))
+    if (e.surface === 'desktop') await seePictures($)
     const scene = await sceneOf($)
     const isShown = await read($, isOn)
 
