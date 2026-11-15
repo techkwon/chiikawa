@@ -81,6 +81,12 @@ export type Task = {
   due?: { at: number; isOk: boolean }
   /** Its end was read off the engine's list, not told by its own turn: that word, coming later, overrules it. */
   isGuessed?: boolean
+  /** The subagent whose loop left a background command running: the command's notice goes to it. */
+  owner?: string
+  /** A background command the engine ends when its owner gives its final answer: no notice comes for it. */
+  isTied?: boolean
+  /** The background command a launch runs in, by the id the engine gave it: the command's notice tells that the launch has ended. */
+  shell?: string
 }
 
 /** A hand lent to the main loop's own work: what it is on, when, and when its character last said so. */

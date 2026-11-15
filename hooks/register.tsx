@@ -6,7 +6,7 @@ import type { Aid, Aids, Lang, MemberId, Phrase, Role, Roles, Said, Task, Tokens
 import type { Situation } from './cast'
 import { CAST, isActive, jobOf, LEAD, MEMBERS, MOODS, pickMember, PROFILES, readingOf, reported, roleOf, roleOfAgent, rolesFrom, say, shown, specialistOf, titleOf, toneOf, withRole, WORK_ROLES, WORKERS } from './cast'
 import type { FleetRun } from './orca'
-import { findFleetRuns, readMeta, voicedSpecPath } from './orca'
+import { findFleetRuns, readMeta, squeezed, voicedSpecPath } from './orca'
 import { clearLook, keepLook, lookKept, SCENES, sceneAsked, setLook, unpainted } from './look'
 import type { LookKept } from './look'
 import { artSource, drawDeskBand, drawDeskPane, drawDeskTurn } from './desk'
@@ -144,7 +144,7 @@ const ROLES_KEPT = 'roles'
 const LANG_KEPT = 'lang'
 
 type Engine = EngineInterface
-type Draft = Pick<Task, 'id' | 'kind' | 'role' | 'engine' | 'title'> & Pick<Task, 'titles' | 'out' | 'call' | 'due' | 'staleAt'>
+type Draft = Pick<Task, 'id' | 'kind' | 'role' | 'engine' | 'title'> & Pick<Task, 'titles' | 'out' | 'call' | 'due' | 'staleAt' | 'owner' | 'isTied'>
 /** A line of the conversation before it has its moment: who, on what occasion, and in each language the words and what they are about. */
 type Line = readonly [member: MemberId, situation: Situation, quote: Phrase, note: Phrase]
 /** How a task ended. */
@@ -799,6 +799,46 @@ const early = new Map<string, { turn: string; outcome: Outcome }[]>()
 const heard = new Map<string, string[]>()
 /** The turns being taken now, each as its agent and turn. */
 const hearing = new Map<string, number>()
+/** The turns whose end has let their agent's tied commands go, each as its agent and turn, oldest first. */
+const untied = new Set<string>()
+/** The tied commands a turn's end was to let go and could not, by their task: they are tried again, and no other command is. */
+const pendingEnd = new Set<string>()
+const PENDING_KEPT = 200
+/**
+ * The tied commands each subagent has left running since its last answer, by their tasks: kept here as they are begun, so that its next
+ * answer knows them without reading anything, and takes none begun after it.
+ */
+const tiedBy = new Map<string, Set<string>>()
+/**
+ * Every tied command this copy of the module has begun, by its task, the last of them: such a one is owed its end by what is kept
+ * above, at the answer it is tied to, and is never looked up in the list of tasks, where it would be taken by an earlier answer.
+ */
+const begun = new Set<string>()
+const BEGUN_KEPT = 2000
+
+/** Notes a tied command as begun here, before its task is written: from then on no reading of the list takes it. */
+const begin = (id: string): void => {
+  begun.delete(id)
+  begun.add(id)
+  for (const old of [...begun].slice(0, Math.max(0, begun.size - BEGUN_KEPT))) begun.delete(old)
+}
+
+/** Notes a command tied to its owner's next answer. */
+const tie = (owner: string, id: string): void => {
+  const held = tiedBy.get(owner) ?? new Set<string>()
+
+  begin(id)
+  held.add(id)
+  tiedBy.delete(owner)
+  tiedBy.set(owner, held)
+  for (const old of [...tiedBy.keys()].slice(0, Math.max(0, tiedBy.size - HEARD_AGENTS))) tiedBy.delete(old)
+}
+
+/** Owes an end to every command the subagent has tied to this answer; what it ties from here on is the next answer's. */
+const untie = (owner: string): void => {
+  for (const id of tiedBy.get(owner) ?? []) pendingEnd.add(id)
+  tiedBy.delete(owner)
+}
 const HEARD_KEPT = 20
 const HEARD_AGENTS = 100
 
@@ -862,9 +902,9 @@ const adopt = async ($: Engine, agentId: string): Promise<void> => {
  * the word is kept for the task the id is given to, so that it ends no
  * other; the same turn told twice is kept once. Where the task's record was
  * let go on a guess of how it ended, what the turn cost is still its
- * character's.
+ * character's. Answers whether the turn was told now, and not before.
  */
-const finish = async ($: Engine, agentId: string, turn: string, outcome: Outcome): Promise<void> => {
+const finish = async ($: Engine, agentId: string, turn: string, outcome: Outcome): Promise<boolean> => {
   const key = `${agentId}\n${turn}`
 
   const now = await $.clock.now().catch(() => 0)
@@ -872,7 +912,7 @@ const finish = async ($: Engine, agentId: string, turn: string, outcome: Outcome
 
   // The same turn told twice is paid once: told again while it is taken, or after, it is passed by. One whose taking failed, or has hung
   // past what any fairly takes, may be told again.
-  if ((heard.get(agentId) ?? []).includes(turn) || (since !== undefined && now - since < STUCK_MS)) return
+  if ((heard.get(agentId) ?? []).includes(turn) || (since !== undefined && now - since < STUCK_MS)) return false
   hearing.set(key, now)
   try {
     await finishTurn($, agentId, turn, outcome)
@@ -884,6 +924,8 @@ const finish = async ($: Engine, agentId: string, turn: string, outcome: Outcome
   } finally {
     if (hearing.get(key) === now) hearing.delete(key)
   }
+
+  return true
 }
 
 const finishTurn = async ($: Engine, agentId: string, turn: string, outcome: Outcome): Promise<void> => {
@@ -961,21 +1003,29 @@ const writtenAt = ($: Engine, path: string): Promise<number | undefined> =>
     () => undefined,
   )
 
-/** Ends an Orca worker whose `<out>.meta.json` has landed since it started; one that was there before it started is an earlier run's. */
-const pollWorker = async ($: Engine, task: Task): Promise<void> => {
-  if (task.out === undefined) return
+/**
+ * Ends an Orca worker whose `<out>.meta.json` has landed since it started; one that was there before it started is an earlier run's.
+ * Answers how the looking went: `ended` where it was read, `none` where there is no result of this run, and `unread` where one is
+ * there, or may be, and could not be read: a file that cannot be looked at, or one not yet whole.
+ */
+const pollWorker = async ($: Engine, task: Task): Promise<'ended' | 'none' | 'unread'> => {
+  if (task.out === undefined) return 'none'
   const path = `${task.out}.meta.json`
   const at = await writtenAt($, path)
 
-  if (at === undefined || at < task.startedAt - 1000 || at === task.staleAt) return
+  // No time read for it: there is none, or the looking failed.
+  if (at === undefined) return (await $.fs.exists(path).catch(() => true)) ? 'unread' : 'none'
+  if (at < task.startedAt - 1000 || at === task.staleAt) return 'none'
   const text = await $.fs.read(path).catch(() => '')
   // How it went and what it cost are the same in any language; how long it took and how it exited are said again as each says them.
   const meta = readMeta(text, WORDS.en)
 
-  if (meta === undefined) return
+  if (meta === undefined) return 'unread'
   const handed = await $.fs.read(task.out).catch(() => '')
 
   await settle($, task.id, { isOk: meta.isOk, why: words => readMeta(text, words)?.note ?? '', tokens: meta.tokens, summary: firstLines(handed, SUMMARY_LINES), opener: openerOf(handed) })
+
+  return 'ended'
 }
 
 /**
@@ -1150,6 +1200,7 @@ const tick = async ($: Engine): Promise<void> => {
 
       return
     }
+    await endPending($).catch(() => undefined)
     const list = await read($, tasks)
     const active = list.filter(isActive)
     const now = await $.clock.now()
@@ -1172,13 +1223,18 @@ const tick = async ($: Engine): Promise<void> => {
       return
     }
     // A list that could not be read says nothing: nobody is ended on its silence.
-    const agents = active.some(task => task.kind === 'agent') ? await $.agent.list().catch(() => undefined) : []
+    const agents = active.some(task => task.kind === 'agent' || task.owner !== undefined) ? await $.agent.list().catch(() => undefined) : []
 
     for (const task of active) {
       if (task.kind === 'orca') await checkWorker($, task, now)
+      // A launch in a subagent's background command outlasts the subagent where the engine does not stop the command at its answer: its
+      // result is still looked for, and the command's notice or its stopping ends it. Only one with no result to look for, whose subagent
+      // failed or was killed, has an end that will not be learned.
+      if (isLaunchIn(task) && task.out === undefined && agents?.some(agent => agent.id === task.owner && (agent.status === 'failed' || agent.status === 'killed')) === true) await endLaunch($, task)
       else if (task.kind === 'agent' && agents !== undefined) await checkAgent($, task, agents, now)
       // A background command whose notice never came after an hour has an end that cannot be learned: it is let go, as a worker with no result.
       else if (task.kind === 'shell' && now - task.startedAt > LOST_MS) await letGo($, task.id, now, words => words.lost)
+      else if (task.kind === 'shell' && task.owner !== undefined && agents !== undefined) await checkShell($, task, agents, now)
       // A subagent's task no agent was told to be whose after two hours has an end that cannot be learned, as a worker's with no result: it is let go.
       if (isUnnamed(task) && now - task.startedAt > LOST_MS * 2) await letGo($, task.id, now, words => words.lost)
     }
@@ -1535,37 +1591,210 @@ const SHELL_CHECKS = /\b(?:test|tests|pytest|jest|vitest|tsc|lint|eslint|validat
 const SHELL_LOOKS = /^\s*(?:grep|rg|find|ls|cat|curl|wget|git\s+(?:log|status|diff|show))\b/i
 const shellRole = (command: string): Role => (SHELL_CHECKS.test(command) ? '검토' : SHELL_LOOKS.test(command) ? '탐색' : '구현')
 
+/** What a Bash call answers of a command it left running in the background: its id, and whether it ends with its caller's final answer. */
+type Backgrounded = { backgroundTaskId?: string; backgroundEndsWithFinalResponse?: boolean }
+
 /**
- * A command the main loop left running in the background, by its own choice
- * or moved there while it ran, is a task like a subagent's: a character takes
- * it, and its notification ends it.
+ * A command left running in the background, by the loop's own choice or
+ * moved there while it ran, is a task like a subagent's: a character takes
+ * it, and its notification ends it. One a subagent left is its own task too,
+ * with the subagent as its owner: the subagent's task may end with its turn
+ * while the command it waits for runs on.
  */
-const watchShell = async ($: Engine, call: string, background: string, command: string, description: string | undefined): Promise<void> => {
+const watchShell = async ($: Engine, call: string, background: string, command: string, description: string | undefined, owner?: { id: string; isTied: boolean }): Promise<void> => {
   const title = description?.trim() || (command.split('\n')[0] ?? '').trim().slice(0, 60)
 
-  await reserve($, { id: `shell:${background}`, kind: 'shell', role: shellRole(command), engine: 'Bash', title, call })
+  if (owner?.isTied === true) begin(`shell:${background}`)
+  await reserve($, { id: `shell:${background}`, kind: 'shell', role: shellRole(command), engine: 'Bash', title, call, ...(owner === undefined ? {} : { owner: owner.id, ...(owner.isTied ? { isTied: true } : {}) }) })
+  if (owner?.isTied === true) tie(owner.id, `shell:${background}`)
 }
 
-/** Ends a background command the main loop stopped, if it is still at work. */
+/** Whether a task is a launch in a command left in the background, which the command's end ends too. */
+const isLaunchIn = (task: Task, id?: string): boolean => task.kind === 'orca' && task.shell !== undefined && (id === undefined || task.shell === id)
+
+/**
+ * Ends a launch whose command has ended: by its result where it wrote one, and let go where it did not, as how it ended is then not known.
+ * Where a result is there, or may be, and could not be read, it is neither: the launch stays owed its end, and is tried again at the
+ * next beat. Answers whether it is owed nothing more.
+ */
+const endLaunch = async ($: Engine, task: Task): Promise<boolean> => {
+  const how = await pollWorker($, task).catch(() => 'unread' as const)
+
+  if (how === 'unread') {
+    pendingEnd.add(task.id)
+
+    return false
+  }
+  if ((await read($, tasks)).some(one => one.id === task.id && isActive(one))) await letGo($, task.id, await $.clock.now(), words => words.lost)
+
+  return true
+}
+
+/**
+ * Lets go the background commands the engine stops at their owner's final
+ * answer: no notice comes for one. It may have ended well before that, its
+ * result read by its owner with no hook told: how it ended is not known.
+ */
+const endTied = async ($: Engine, owner: string): Promise<void> => {
+  // The commands tied to this answer are the ones held now: each is kept by its task until it is ended, so that one whose ending fails
+  // is tried again by itself, and what the subagent leaves running after this is not taken with it. The ones begun while this copy of
+  // the module ran are owed already; the list is read for any begun before it, and a reading that fails leaves those to the beat.
+  // This comes after the turn is taken, which may be long after its answer: one begun here is the next answer's by then, and is left.
+  const held = await read($, tasks).catch(() => [])
+
+  for (const task of held.filter(one => (one.kind === 'shell' || isLaunchIn(one)) && one.owner === owner && one.isTied === true && isActive(one) && !begun.has(one.id))) pendingEnd.add(task.id)
+  await endPending($)
+}
+
+/** Ends each tied command still owed its end; one whose ending fails again stays owed, and one no longer at work is owed nothing. */
+const endPending = async ($: Engine): Promise<void> => {
+  for (const old of [...pendingEnd].slice(0, Math.max(0, pendingEnd.size - PENDING_KEPT))) pendingEnd.delete(old)
+  if (pendingEnd.size === 0) return
+  const held = await read($, tasks)
+
+  for (const id of [...pendingEnd]) {
+    const task = held.find(one => one.id === id && isActive(one))
+
+    try {
+      if (task?.kind === 'shell') await letGo($, task.id, await $.clock.now(), words => words.lost)
+      else if (task !== undefined && !(await endLaunch($, task))) continue
+      pendingEnd.delete(id)
+    } catch {
+      // Still owed.
+    }
+  }
+}
+
+/**
+ * One beat of a background command a subagent left running. Its notice goes
+ * to the subagent, and may reach no hook. Once the subagent has ended, or the
+ * engine no longer lists it, nobody is known to wait for the command: how it
+ * ended was never seen, so it is let go, told as neither done nor failed. A
+ * subagent that answered may yet be woken by the notice of a command that
+ * outlived the answer: it is given a few beats first.
+ */
+const checkShell = async ($: Engine, task: Task, agents: readonly AgentInfo[], now: number): Promise<void> => {
+  const info = agents.find(agent => agent.id === task.owner)
+  const key = `shell-owner:${task.id}`
+
+  if (info !== undefined && info.status !== 'completed' && info.status !== 'failed' && info.status !== 'killed') {
+    unlisted.delete(key)
+
+    return
+  }
+  if (info === undefined && now - task.startedAt <= 30_000) return
+  const beats = (unlisted.get(key) ?? 0) + 1
+
+  unlisted.set(key, beats)
+  if ((info === undefined || info.status === 'completed') && beats < UNLISTED_BEATS) return
+  unlisted.delete(key)
+  await letGo($, task.id, now, words => words.lost)
+}
+
+/** Ends a background command its loop stopped, if it is still at work, and the launches that ran in it. */
 const stopShell = async ($: Engine, id: string): Promise<void> => {
-  const task = (await read($, tasks)).find(one => one.id === `shell:${id}` && isActive(one))
+  const held = await read($, tasks)
+  const task = held.find(one => one.id === `shell:${id}` && isActive(one))
 
   if (task !== undefined) await settle($, task.id, { isOk: false, why: words => words.stopped })
+  for (const launch of held.filter(one => isLaunchIn(one, id) && isActive(one))) await endLaunch($, launch)
+}
+
+/** The shell the Bash tool runs commands in, asked once a session. */
+const toolShell: { asked?: Promise<'zsh' | 'bash' | undefined> } = {}
+
+/**
+ * The shell the Bash tool runs commands in, as the engine picks it: the first of `CLAUDE_CODE_SHELL` and `SHELL` that names bash or zsh
+ * and is there to run. One that is not there the engine passes by, and so is it here. Where none of them is there the engine looks in
+ * places of its own, and the shell is not known; neither is it where a path names both, or where a path cannot be looked for.
+ */
+const shellOf = ($: Engine): Promise<'zsh' | 'bash' | undefined> => {
+  toolShell.asked ??= (async () => {
+    try {
+      for (const path of [await $.env.get('CLAUDE_CODE_SHELL'), await $.env.get('SHELL')]) {
+        const isZsh = path?.includes('zsh') === true
+        const isBash = path?.includes('bash') === true
+
+        if (path === undefined || (!isZsh && !isBash) || !(await $.fs.exists(path))) continue
+
+        return isZsh && isBash ? undefined : isZsh ? 'zsh' : 'bash'
+      }
+    } catch {
+      return undefined
+    }
+
+    return undefined
+  })()
+
+  return toolShell.asked
 }
 
 /** What a background task's notification says: its id, how it ended, and its one-line summary. */
-const NOTICE = /<task-notification>([\s\S]*?)<\/task-notification>/g
+const NOTICE_OPEN = '<task-notification>'
+const NOTICE_CLOSE = '</task-notification>'
+/** What each notice in a text holds, in order: read by its two tags, each place of the text once. One left open ends the reading. */
+const noticesIn = (text: string): string[] => {
+  const blocks: string[] = []
+  let at = 0
+
+  for (;;) {
+    const open = text.indexOf(NOTICE_OPEN, at)
+    const close = open < 0 ? -1 : text.indexOf(NOTICE_CLOSE, open + NOTICE_OPEN.length)
+
+    if (close < 0) return blocks
+    blocks.push(text.slice(open + NOTICE_OPEN.length, close))
+    at = close + NOTICE_CLOSE.length
+  }
+}
 const field = (block: string, name: string): string | undefined => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(block)?.[1]?.trim()
 
-/** Ends the background commands a notification tells of: a nonzero exit, a failure or a stop is a failure. */
-const endShells = async ($: Engine, text: string): Promise<void> => {
-  const active = (await read($, tasks)).filter(task => task.kind === 'shell' && isActive(task))
+/** What the engine begins a turn's text with where a background task's end woke the turn. */
+const NOTICE_HEAD = '[SYSTEM NOTIFICATION - NOT USER INPUT]'
 
-  if (active.length === 0) return
-  for (const [, block = ''] of text.matchAll(NOTICE)) {
+/**
+ * The notices a subagent's turn begins with, where a background command's end woke it: the text opens with the engine's own heading or
+ * with the notice itself, and the notices are the ones that stand together first. A message that only quotes one further on tells of no end.
+ */
+const wokenBy = (text: string): string | undefined => {
+  const opened = text.trimStart()
+
+  if (!opened.startsWith(NOTICE_HEAD) && !opened.startsWith('<task-notification>')) return undefined
+
+  const from = opened.indexOf(NOTICE_OPEN)
+  let at = from
+
+  // Each notice, with only blanks before it, read once: a text is not read again from each of its places.
+  for (;;) {
+    const blank = /\s*/y
+
+    blank.lastIndex = at
+    const open = at + (blank.exec(opened)?.[0].length ?? 0)
+    const close = opened.startsWith(NOTICE_OPEN, open) ? opened.indexOf(NOTICE_CLOSE, open + NOTICE_OPEN.length) : -1
+
+    if (close < 0) return at === from ? undefined : opened.slice(from, at)
+    at = close + NOTICE_CLOSE.length
+  }
+}
+
+/**
+ * Ends the background commands a notification tells of: a nonzero exit, a
+ * failure or a stop is a failure. Given an owner, only that subagent's
+ * commands: the text a subagent's turn begins with may quote a notice of
+ * another's.
+ */
+const endShells = async ($: Engine, text: string, owner?: string): Promise<void> => {
+  const waited = (await read($, tasks)).filter(task => isActive(task) && (owner === undefined || task.owner === owner))
+  const active = waited.filter(task => task.kind === 'shell')
+  /** The launches in a command left in the background: the command's end is theirs. */
+  const launched = waited.filter(task => task.kind === 'orca' && task.shell !== undefined)
+
+  if (active.length === 0 && launched.length === 0) return
+  for (const block of noticesIn(text)) {
     const id = field(block, 'task-id')
     const task = active.find(one => one.id === `shell:${id ?? ''}`)
 
+    // A launch whose command has ended wrote its result by then, or never will: with none, how it ended is not known.
+    for (const launch of launched.filter(one => one.shell === id)) await endLaunch($, launch)
     if (task === undefined) continue
     const status = field(block, 'status') ?? ''
     const summary = field(block, 'summary') ?? ''
@@ -1619,6 +1848,8 @@ export const register: Register = (on, options) => {
   const isLookWanted = options.desktopLook !== false
 
   on('session.start', async ($, e, next) => {
+    // The shell the Bash tool runs is asked again each session.
+    delete toolShell.asked
     await reload($)
     // The person's own pictures for the desktop cards, if any; a friend with none keeps its emoji. They are kept in the session's state, which every drawing reads (the band may be drawn where this copy of the module is not).
     await keepPictures($)
@@ -1697,6 +1928,10 @@ export const register: Register = (on, options) => {
         unlisted.clear()
         early.clear()
         heard.clear()
+        untied.clear()
+        pendingEnd.clear()
+        tiedBy.clear()
+        begun.clear()
         await update($, paid, () => ({}))
         await update($, owed, () => [])
         clears += 1
@@ -1914,7 +2149,7 @@ export const register: Register = (on, options) => {
       })
       .finally(() => asking.delete(e.tool_use_id))
 
-    if (started.deny !== undefined) await forget()
+    if (started.deny !== undefined) await forget().catch(() => undefined)
     else if (started.agentId !== undefined) await bind($, e.tool_use_id, started.agentId).catch(() => undefined)
 
     return started
@@ -1922,7 +2157,8 @@ export const register: Register = (on, options) => {
 
   on('tool.call', async ($, e, next) => {
     const command = e.tool === 'Bash' ? e.command : ''
-    const isFleet = command.includes('fleet-run')
+    // The name may be written over two lines, joined by a backslash, or with quotes or a backslash in it: the shell reads it as one word all the same.
+    const isFleet = command.replace(/\\\n/g, '').replace(/['"\\]/g, '').includes('fleet-run')
 
     if (e.tool === 'Agent' || isFleet) await ensure($).catch(() => undefined)
 
@@ -1941,7 +2177,7 @@ export const register: Register = (on, options) => {
       if (e.tool !== 'Bash') return next(e)
       const ran = await next(e)
       // Left running in the background, asked for or moved there: a character watches it to its end.
-      const background = ran.deny === undefined && ran.isError !== true ? (ran.result as { backgroundTaskId?: string } | undefined)?.backgroundTaskId : undefined
+      const background = ran.deny === undefined && ran.isError !== true ? (ran.result as Backgrounded | undefined)?.backgroundTaskId : undefined
 
       if (background !== undefined && (await read($, isOn).catch(() => false))) {
         await ensure($).catch(() => undefined)
@@ -1950,21 +2186,39 @@ export const register: Register = (on, options) => {
 
       return ran
     }
-    if (!(await read($, isOn))) return next(e)
+    if (!(await read($, isOn))) {
+      const ran = await next(e)
+      const id = e.tool === 'TaskStop' ? (e.task_id ?? e.shell_id) : undefined
+
+      // A command a subagent stops while the mode is off has ended all the same: no notice may come for it once the mode is on again.
+      if (e.agentId !== undefined && id !== undefined && ran.deny === undefined && ran.isError !== true) await stopShell($, id).catch(() => undefined)
+
+      return ran
+    }
     if (e.agentId !== undefined) await touch($, e.agentId, e.tool, detailOf(e)).catch(() => undefined)
 
     if (e.tool === 'Bash' && isFleet) {
       const home = await $.env.get('HOME').catch(() => undefined)
       // Any change of folder in the command, in any quoting: a path not from the root is then not read where the command reads it.
       // Only where a command stands, after a separator or opening a script given to a shell: `echo 'cd'` moves nothing.
-      const isMoved = /(?:^|[;&|(){}\n!]|\b(?:if|then|do|else|elif|while|until|time|exec|command|builtin)\s|(?:\s-[A-Za-z]*c|--command)[\s=]+['"]?)\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:cd|pushd|popd|chdir)(?=$|[\s;&|)])/.test(command) ||
+      const isMoved = /(?:^|[;&|(){}\n!]|\b(?:if|then|do|else|elif|while|until|time|exec|command|builtin)\s|(?:\s-[A-Za-z]*c|--command)[\s=]+['"]?)\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:cd|pushd|popd|chdir)(?=$|[\s;&|)])/.test(squeezed(command.replace(/\\\n/g, ''))) ||
         // An Orca terminal opened at a worktree starts there, not where this session reads.
         /\borca\s+terminal\s+create\b[^\n]*\s--worktree\b/.test(command)
       const usable = (path: string | undefined): string | undefined =>
         path === undefined || (isMoved && !path.startsWith('/')) ? undefined : path
       const made: { task: Task; run: FleetRun; voiced?: string; isShared: boolean; isUncopied: boolean }[] = []
 
-      for (const [index, run] of findFleetRuns(command, home).entries()) {
+      const tool = await shellOf($).catch(() => undefined)
+      // A command the reading fails on, as one nested deeper than it can follow, is run as it is written, as a command like any other.
+      const found = ((): FleetRun[] => {
+        try {
+          return findFleetRuns(command, home, tool)
+        } catch {
+          return []
+        }
+      })()
+
+      for (const [index, run] of found.entries()) {
         const role = PROFILES[run.profile] ?? '구현'
         const out = usable(run.out)
         // A result already at the worker's place is an earlier run's: it is known again by when it was written.
@@ -1991,79 +2245,172 @@ export const register: Register = (on, options) => {
         .filter(one => one.voiced !== undefined)
         .sort((a, b) => (b.run.specSpan?.[0] ?? 0) - (a.run.specSpan?.[0] ?? 0))
         .reduce((text, { run, voiced }) => `${text.slice(0, run.specSpan?.[0])}${voiced ?? ''}${text.slice(run.specSpan?.[1])}`, command)
+      // With no launch in it, the command is one like any other: the three are seen at the main loop's.
+      if (made.length === 0 && e.agentId === undefined && isTrioShown) await lend($, e.tool, detailOf(e)).catch(() => undefined)
       const ran = await next(rewritten === command ? e : { ...e, command: rewritten }).catch(async (error: unknown) => {
         for (const { task } of made) await drop($, task.id)
         throw error
       })
 
-      if (made.length === 0) return ran
-      if (ran.deny !== undefined) {
-        for (const { task } of made) await drop($, task.id)
+      if (made.length === 0) {
+        // And left running in the background, it is watched to its end as any other is.
+        const background = ran.deny === undefined && ran.isError !== true ? (ran.result as Backgrounded | undefined) : undefined
+
+        if (background?.backgroundTaskId !== undefined && (await read($, isOn).catch(() => false))) {
+          await watchShell($, e.tool_use_id, background.backgroundTaskId, e.command, e.description, e.agentId === undefined ? undefined : { id: e.agentId, isTied: background.backgroundEndsWithFinalResponse === true }).catch(() => undefined)
+        }
 
         return ran
       }
+      // The command has run: nothing that fails from here on may reach the hook's own catch, which would run it again.
+      try {
+        if (ran.deny !== undefined) {
+          for (const { task } of made) await drop($, task.id)
 
-      const isFailed = ran.isError === true
-
-      for (const { task, run, isShared } of made) {
-        // Each launch by what hands it on, its own `&`, an Orca terminal or `nohup` around it: another launch of the same command is waited for all the same.
-        const isAway = run.isBackground || run.isDetached || e.run_in_background === true
-        // With no result file to read its end from: one another worker has, or one whose path could not be read.
-        const unread = task.out !== undefined ? undefined : isShared ? (words: Words) => words.sharedOut : run.hasOut ? (words: Words) => words.unseen : undefined
-
-        // Turned away by fleet-run itself: no worker starts and nothing is written, so it ends now.
-        if (run.isRefused === true) {
-          await settle($, task.id, { isOk: false, why: words => (run.isLacking === true ? words.turnedAway : words.turnedAwayOdd) }).catch(() => undefined)
-          continue
+          return ran
         }
-        if (task.out !== undefined) await pollWorker($, task).catch(() => undefined)
-        // A launch that answered an error has failed. Handed on, its worker may be running all the same: that end is a guess, and the result is still looked for.
-        if (isFailed) await settle($, task.id, isAway ? { isOk: false, why: words => words.launchFailed, isGuessed: true } : { isOk: false }).catch(() => undefined)
-        else if (!isAway) await settle($, task.id, { isOk: true, ...(unread === undefined ? {} : { why: unread }) }).catch(() => undefined)
-        else if (task.out === undefined) {
-          const note = inAll(lang => (isShared ? WORDS[lang].sharedOut : WORDS[lang].noPath))
 
-          await update($, tasks, list => list.map(one => (one.id === task.id && isActive(one) ? { ...one, status: 'waiting' as const, note } : one))).catch(() => undefined)
+        const isFailed = ran.isError === true
+        // The engine may leave the command running in the background by itself, at its timeout or at the person's key: it has not ended then, whatever it was asked.
+        const shellId = isFailed ? undefined : (ran.result as Backgrounded | undefined)?.backgroundTaskId
+        const isLeft = e.run_in_background === true || shellId !== undefined
+
+        for (const { task, run, isShared } of made) {
+          // Each launch by what hands it on, its own `&`, an Orca terminal or `nohup` around it: another launch of the same command is waited for all the same.
+          const isAway = run.isBackground || run.isDetached || isLeft
+          // With no result file to read its end from: one another worker has, or one whose path could not be read.
+          const unread = task.out !== undefined ? undefined : isShared ? (words: Words) => words.sharedOut : run.hasOut ? (words: Words) => words.unseen : undefined
+
+          // Turned away by fleet-run itself: no worker starts and nothing is written, so it ends now.
+          // Only where it surely ran: one that may have been passed by was turned away by nothing.
+          if (run.isRefused === true && run.isMaybe !== true) {
+            await settle($, task.id, { isOk: false, why: words => (run.isLacking === true ? words.turnedAway : words.turnedAwayOdd) }).catch(() => undefined)
+            continue
+          }
+          if (run.isRefused === true) {
+            await letGo($, task.id, await $.clock.now(), words => words.lost).catch(() => undefined)
+            continue
+          }
+          const how = task.out === undefined ? 'none' : await pollWorker($, task).catch(() => 'unread' as const)
+          // The command's notice, when it ends in the background, tells that a launch it waited for has ended too.
+          if (isAway && !isFailed && shellId !== undefined && !run.isBackground && !run.isDetached) {
+            if (e.agentId !== undefined && (ran.result as Backgrounded | undefined)?.backgroundEndsWithFinalResponse === true) begin(task.id)
+            await update($, tasks, list => list.map(one => (one.id === task.id && isActive(one) ? { ...one, shell: shellId, ...(e.agentId === undefined ? {} : { owner: e.agentId, ...((ran.result as Backgrounded | undefined)?.backgroundEndsWithFinalResponse === true ? { isTied: true } : {}) }) } : one))).catch(() => undefined)
+            if (e.agentId !== undefined && (ran.result as Backgrounded | undefined)?.backgroundEndsWithFinalResponse === true) tie(e.agentId, task.id)
+          }
+          if (!isAway && (run.isMaybe === true || run.ownsExit !== true)) {
+            // The launch may have been passed by, or run to a failure the command took in, as before `|| true` or a pipe; or the command
+            // went on after it, and ended as something else did. With no result once the command
+            // ended, which is not told. It is let go, as neither done nor failed, and not taken off unseen.
+            // A result that is there, or may be, and could not be read is not none: the launch stays owed its end, and is read at the next beat.
+            if (how === 'unread') {
+              pendingEnd.add(task.id)
+              continue
+            }
+            if ((await read($, tasks)).some(one => one.id === task.id && isActive(one))) {
+              await letGo($, task.id, await $.clock.now(), words => words.lost).catch(() => undefined)
+              continue
+            }
+          }
+          // A launch that answered an error has failed. Handed on, its worker may be running all the same: that end is a guess, and the result is still looked for.
+          if (isFailed) await settle($, task.id, isAway ? { isOk: false, why: words => words.launchFailed, isGuessed: true } : { isOk: false }).catch(() => undefined)
+          else if (!isAway) await settle($, task.id, { isOk: true, ...(unread === undefined ? {} : { why: unread }) }).catch(() => undefined)
+          else if (task.out === undefined) {
+            const note = inAll(lang => (isShared ? WORDS[lang].sharedOut : WORDS[lang].noPath))
+
+            await update($, tasks, list => list.map(one => (one.id === task.id && isActive(one) ? { ...one, status: 'waiting' as const, note } : one))).catch(() => undefined)
+          }
         }
+        // Turned off while the command ran, the mode adds no word of its own to the result.
+        if (!(await read($, isOn).catch(() => false))) return ran
+        const spoke = await langOf($)
+        const lines = made.map(({ task, voiced, isUncopied }) => fleetNote(spoke, task.member, task.role, task.engine, task.title, voiced, isUncopied))
+
+        return { ...ran, context: [...(ran.context ?? []), ...lines] }
+      } catch {
+        return ran
       }
-      // Turned off while the command ran, the mode adds no word of its own to the result.
-      if (!(await read($, isOn).catch(() => false))) return ran
-      const spoke = await langOf($)
-      const lines = made.map(({ task, voiced, isUncopied }) => fleetNote(spoke, task.member, task.role, task.engine, task.title, voiced, isUncopied))
-
-      return { ...ran, context: [...(ran.context ?? []), ...lines] }
     }
 
     const ran = await next(e)
 
-    if (e.agentId !== undefined && ran.deny !== undefined) {
-      const task = (await read($, tasks)).find(one => one.id === e.agentId)
+    // The call has run: nothing that fails from here on may reach the hook's own catch, which would run it again.
+    try {
+      // A subagent's command left running in the background is watched as the main loop's is, and one it stops has ended.
+      if (e.agentId !== undefined && e.tool === 'Bash' && !isFleet && ran.deny === undefined && ran.isError !== true) {
+        const left = ran.result as Backgrounded | undefined
 
-      if (task !== undefined) {
-        await tell($, await $.clock.now(), [
-          [task.member, 'denied', lineOf(task.member, 'denied', 0), inAll(lang => WORDS[lang].denied(e.tool))],
-          ['rodo', 'denied', lineOf('rodo', 'denied', 0), inAll(lang => WORDS[lang].watching(CAST[lang].names[task.member], e.tool))],
-        ])
+        // Turned off while the call ran, the mode takes no task for it.
+        if (left?.backgroundTaskId !== undefined && (await read($, isOn).catch(() => false))) {
+          await watchShell($, e.tool_use_id, left.backgroundTaskId, e.command, e.description, { id: e.agentId, isTied: left.backgroundEndsWithFinalResponse === true }).catch(() => undefined)
+        }
       }
-    }
-    // Turned off while the call ran, the mode adds no word of its own to the result.
-    if (e.tool === 'Agent' && e.agentId === undefined && ran.deny === undefined && (await read($, isOn).catch(() => false))) {
-      const task = (await read($, tasks)).find(one => one.call === e.tool_use_id && one.kind === 'agent')
+      if (e.agentId !== undefined && e.tool === 'TaskStop' && ran.deny === undefined && ran.isError !== true) {
+        const id = e.task_id ?? e.shell_id
 
-      if (task !== undefined) return { ...ran, context: [...(ran.context ?? []), tookNote(await langOf($), task.member, task.role)] }
+        if (id !== undefined) await stopShell($, id).catch(() => undefined)
+      }
+      if (e.agentId !== undefined && ran.deny !== undefined) {
+        const task = (await read($, tasks)).find(one => one.id === e.agentId)
+
+        if (task !== undefined) {
+          await tell($, await $.clock.now(), [
+            [task.member, 'denied', lineOf(task.member, 'denied', 0), inAll(lang => WORDS[lang].denied(e.tool))],
+            ['rodo', 'denied', lineOf('rodo', 'denied', 0), inAll(lang => WORDS[lang].watching(CAST[lang].names[task.member], e.tool))],
+          ])
+        }
+      }
+      // Turned off while the call ran, the mode adds no word of its own to the result.
+      if (e.tool === 'Agent' && e.agentId === undefined && ran.deny === undefined && (await read($, isOn).catch(() => false))) {
+        const task = (await read($, tasks)).find(one => one.call === e.tool_use_id && one.kind === 'agent')
+
+        if (task !== undefined) return { ...ran, context: [...(ran.context ?? []), tookNote(await langOf($), task.member, task.role)] }
+      }
+    } catch {
+      // What the call answered is handed on as it is.
     }
 
     return ran
   }).catch(($, e, next) => next(e))
 
+  // A subagent parked for its background command is woken by the command's notice: the turn that begins with it ends the command's task.
+  on('turn.start', async ($, e, next) => {
+    const notices = e.agentId === undefined ? undefined : wokenBy(e.text)
+
+    if (e.agentId !== undefined && notices !== undefined) await endShells($, notices, e.agentId).catch(() => undefined)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // A task taken while the mode was on is ended by its turn though the mode is off by then; a task started while it is off is no task here, and the main loop's own turns are counted only while it is on.
+  // A notice that comes while its loop is in a turn begins no turn: the engine hands it on beside the loop's next request, as a
+  // message of its own that opens as a turn woken by one does. A subagent's ends its own commands only, as there.
+  on('prompt.attachment', { type: 'queued_command' }, async ($, e, next) => {
+    const notices = wokenBy(e.text)
+
+    if (notices !== undefined) await endShells($, notices, e.agentId).catch(() => undefined)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     const spent = e.usage === undefined ? undefined : tokensOf(e.usage)
 
     if (e.agentId !== undefined) {
       const why = ENDS[e.reason]
 
-      await finish($, e.agentId, e.turnId, { isOk: e.reason === 'answer', ...(why === undefined ? {} : { why }), tokens: spent, summary: firstLines(e.answer, SUMMARY_LINES), opener: openerOf(e.answer) }).catch(() => undefined)
+      const key = `${e.agentId}\n${e.turnId}`
+      // The same turn told again ends nothing more: what its subagent began since is another turn's. That is kept apart from
+      // whether the turn was taken: one whose taking failed is taken when told again, and has let its commands go once all the same.
+      const isFirst = !untied.has(key)
+
+      untied.add(key)
+      if (isFirst) untie(e.agentId)
+      for (const old of [...untied].slice(0, Math.max(0, untied.size - HEARD_KEPT * HEARD_AGENTS))) untied.delete(old)
+      await finish($, e.agentId, e.turnId, { isOk: e.reason === 'answer', ...(why === undefined ? {} : { why }), tokens: spent, summary: firstLines(e.answer, SUMMARY_LINES), opener: openerOf(e.answer) }).catch(() => false)
+      // A turn told again lets go only what its first telling could not.
+      if (isFirst) await endTied($, e.agentId).catch(() => undefined)
+      else await endPending($).catch(() => undefined)
     } else if (await read($, isOn).catch(() => false)) {
       if (spent !== undefined) await update($, leaderTokens, total => plus(total, spent))
       await refreshUsage($).catch(() => undefined)

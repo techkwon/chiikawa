@@ -533,7 +533,7 @@ test("a fleet-run's paths are filled in as the shell fills them, and left as wri
 
   expect(run?.spec).toBe('/fixture/a.md')
   expect(prefixed.slice(run?.specSpan?.[0], run?.specSpan?.[1])).toBe('$X')
-  expect(findFleetRuns('X=/fixture/b.md fleet-run codex-build --spec "$X"')[0]).toEqual({ profile: 'codex-build', title: 'codex-build', hasOut: false, isBackground: false, isDetached: false, isRefused: true, isLacking: true })
+  expect(findFleetRuns('X=/fixture/b.md fleet-run codex-build --spec "$X"')[0]).toEqual({ profile: 'codex-build', title: 'codex-build', hasOut: false, isBackground: false, isDetached: false, isRefused: true, isLacking: true, ownsExit: true })
 
   // Single quotes keep `$` and `~` as they are written, and so do double quotes a `~`.
   const spec = (command: string): string | undefined => findFleetRuns(command, '/home/me')[0]?.spec
@@ -738,7 +738,7 @@ const SURE: readonly (readonly [string, ...string[]])[] = [
   ['X=/fixture/a.md; env A=1 fleet-run codex-build --spec "$X"', 'codex-build /fixture/a.md $X - waited'],
   ['X=/fixture/a.md; bash -c "fleet-run codex-build --spec $X"', 'codex-build /fixture/a.md $X - waited'],
   ['X=/fixture/a.md; sh -c \'X=/fixture/b.md; fleet-run codex-build --spec "$X"\'', 'codex-build /fixture/b.md $X - waited'],
-  ['X=/fixture/a.md; cat <(fleet-run codex-build --spec "$X")', 'codex-build /fixture/a.md $X - waited'],
+  ['X=/fixture/a.md; cat <(fleet-run codex-build --spec "$X")', 'codex-build /fixture/a.md $X - away'],
   // The ways a conductor hands a task to an Orca terminal.
   [
     'R=/fixture/run; orca terminal create --worktree "id:$ORCA_WORKTREE_ID" --title "codex-hard: x" --command "fleet-run codex-hard --no-browser --cwd $R --spec $R/x.spec.md --out $R/x.out.md --timeout-min 40; echo \'[끝]\'" --json 2>&1 | grep handle',
@@ -1132,4 +1132,785 @@ test('what shells read each their own way is never taken for sure: no launch is 
   expect(findFleetRuns('zsh -c \'fleet-run grok-research --cwd sub --spec "/w/s p.md" --out 12>x.log "/w/s p.md"\'')[0]?.out).toBeUndefined()
   // A here-document whose closing word goes on past its quotes is not followed: what it holds is no command.
   expect(findFleetRuns(`cat <<"E"F\nE\n${F}\nEF`)).toEqual([])
+})
+
+test('a launch that may be passed by is told so: in a block that may not run, or after `&&` or `||`', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const sure of [F, `cd /w; ${F}`, `{ ${F}; }`, `(${F})`, `for t in a b; do ${F}; done`, `${F} && echo done`, `echo x | ${F}`, `if ${F}; then :; fi`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} ${maybe(sure).map(() => '').join()}`)
+  }
+  // zsh stops at a pattern that matches nothing, a `~name` with no such user or an `=name` with no such program.
+  for (const risky of [`${F} --brow*`, 'fleet-run codex-build --cwd /w --spec /w/a.md --out=*.md', `${F} --timeout-min ~nobody`, `${F} =nothing`]) {
+    expect(`${risky} ${maybe(risky).join()}`).toBe(`${risky} true`)
+  }
+  expect(maybe(`${F} --timeout-min ~/x`)).toEqual([undefined])
+  for (const passed of [`cd /w && ${F}`, `true || ${F}`, `if false; then ${F}; fi`, `while false; do ${F}; done`, `[ -d /w ] && sh -c "${F}"`, `if true; then for t in a; do ${F}; done; fi`]) {
+    expect(`${passed} ${maybe(passed).join()}`).toBe(`${passed} ${maybe(passed).map(() => 'true').join()}`)
+  }
+})
+
+test('a launch that hangs on an `&&` or `||` may be passed by all the same in a pipeline or a parenthesis after it', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const passed of [`cd /w && (${F})`, `cd /w && (${F} &)`, `false && echo x | ${F}`, `true || (${F} | cat)`, `false && (echo a; ${F})`, `false && { echo a; } | ${F}`, `[ -d /w ] && (cd /w; sh -c "${F}")`]) {
+    expect(`${passed} ${maybe(passed).join()}`).toBe(`${passed} true`)
+  }
+  // What follows the parenthesis or the list hangs on nothing: it runs whatever came before.
+  for (const sure of [`(${F})`, `echo x | ${F}`, `false && echo a; (${F})`, `(false && echo a); ${F}`, `{ false && echo a; }; ${F}`, `false && (echo a); ${F}`, `(cd /w; ${F}) && echo done`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} `)
+  }
+})
+
+test('a line that ends in `&&`, `||` or `|` goes on in the next: what stands there hangs on it, and assigns nothing for sure', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const G = 'fleet-run codex-build --cwd /w --spec $X --out /w/b.md'
+
+  expect(findFleetRuns(`cd /w &&\n${F}`).map(run => run.isMaybe)).toEqual([true])
+  expect(findFleetRuns(`cd /w ||\n\n  ${F}`).map(run => run.isMaybe)).toEqual([true])
+  expect(findFleetRuns(`cd /w &&\n# then the worker\n(${F})`).map(run => run.isMaybe)).toEqual([true])
+  expect(findFleetRuns(`echo x |\n${F}`).map(run => run.isMaybe)).toEqual([undefined])
+  // The assignment on the next line is made only if the line before went that way: the variable is not known after it.
+  for (const joined of ['false &&\nX=/w/z.md\n', 'true ||\nX=/w/z.md\n', 'true |\nX=/w/z.md\n']) {
+    expect(`${joined} ${findFleetRuns(`X=/w/a.md; ${joined}${G}`)[0]?.spec}`).toBe(`${joined} undefined`)
+  }
+  expect(findFleetRuns(`X=/w/a.md\nX=/w/z.md\n${G}`)[0]?.spec).toBe('/w/z.md')
+})
+
+test('a launch past a word that may have left the shell may be passed by: an `exit`, a `return` or an `exec` before it, or a `break` in no loop', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const left of [`exit 0; ${F}`, `cd /w || exit 0\n${F}`, `[ -s /w/a.md ] || { echo missing; exit 0; }; ${F}`, `if [ -f /w/b.md ]; then exit 0; fi; ${F}`, `exec true; ${F}`, `return 0 2>/dev/null; ${F}`, `command exit; ${F}`, `break 2>/dev/null; ${F}`, `if true; then continue 2>/dev/null; fi; ${F}`]) {
+    expect(`${left} ${maybe(left).join()}`).toBe(`${left} true`)
+  }
+  // One that leaves after the launch, or leaves another shell or only a loop, or is only a word printed, passes nothing by.
+  for (const sure of [`${F}; exit 0`, `sh -c "exit 0"; ${F}`, `echo exit; ${F}`, `exec ${F}`, `while [ ! -s /w/a.md ]; do sleep 1; break; done; ${F}`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} `)
+  }
+})
+
+test('a word that leaves a parenthesis leaves only that shell: a launch after the parenthesis is sure, and one after the word inside it is not', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const sure of [`(exit 0); ${F}`, `(cd /w || exit 0; echo there); ${F}`, `(echo a; (return 0); echo b)\n${F}`, `echo "$(exit 0)"; ${F}`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} `)
+  }
+  for (const left of [`(exit 0; ${F})`, `(cd /w || exit 0; ${F})`, `{ exit; }; ${F}`, `exit 0; (echo a); ${F}`, `(exit 0; (echo a); ${F})`]) {
+    expect(`${left} ${maybe(left).join()}`).toBe(`${left} true`)
+  }
+  // One sure and one not, each side of the parenthesis's end.
+  expect(maybe(`(exit 0; ${F}); ${F}`)).toEqual([true, undefined])
+})
+
+test('a launch the statement that leaves the shell itself runs is not past it: the script an `exec` hands on is sure, and what follows is not', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const sure of [`exec sh -c '${F}'`, `exec bash -c "${F}"`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} `)
+  }
+  expect(maybe(`exec sh -c '${F}'; ${F}`)).toEqual([undefined, true])
+})
+
+test('a word that leaves only a shell of its own, left running behind or piped on to another command, passes no launch by; the last of a pipeline may', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const sure of [`exit 0 & ${F}`, `exit 0 | cat; ${F}`, `exit 0 | ${F}`, `return 0 2>/dev/null |& cat\n${F}`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} `)
+  }
+  // zsh runs the last command of a pipeline in the shell itself.
+  for (const left of [`echo | exit; ${F}`, `exit 0 | cat | exit 0; ${F}`, `exit 0 & exit 0; ${F}`]) {
+    expect(`${left} ${maybe(left).join()}`).toBe(`${left} true`)
+  }
+})
+
+test('a launch in a `{` group surely runs where the group does: it may be passed by only as the group may, or as any launch may', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const sure of [`{ echo prep; ${F}; }`, `{ ${F}; }`, `{\n  echo prep\n  { echo more; ${F}; }\n}`, `{ false && echo a; ${F}; }`, `{ echo a; } && echo b; ${F}`, `{ if true; then echo a; fi; ${F}; }`, `{ (cd /w || exit 0); echo a | cat; ${F}; }`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} `)
+  }
+  for (const passed of [`false && { ${F}; }`, `false && { echo a; ${F}; }`, `if true; then { ${F}; }; fi`, `if true; then { echo a; ${F}; }; fi`, `{ echo a; false && ${F}; }`, `{ echo a; exit 0; ${F}; }`, `while true; do { echo a; ${F}; }; break; done`, `false || { echo a; { echo b; ${F}; }; }`]) {
+    expect(`${passed} ${maybe(passed).join()}`).toBe(`${passed} true`)
+  }
+  expect(maybe(`false && { echo a; ${F}; }; { echo b; ${F}; }`)).toEqual([true, undefined])
+  // A function's body is not read: it may never be called.
+  expect(maybe(`f() { echo a; ${F}; }`)).toEqual([])
+})
+
+test('a `{` group left running behind or piped on runs in a shell of its own: a word that leaves, in it, passes no later launch by', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const sure of [`{ exit 0; } | cat; ${F}`, `{ exit 0; } & ${F}`, `{ echo a; { exit 0; } | cat; }; ${F}`, `{ cd /w || exit 0; echo a; } 2>&1 | cat\n${F}`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} `)
+  }
+  for (const left of [`{ exit 0; }; ${F}`, `echo | { exit 0; }; ${F}`, `exit 0; { echo a; } | cat; ${F}`, `{ exit 0; ${F}; } | cat`, `{ { exit 0; }; echo a; } | cat | { exit 0; }; ${F}`]) {
+    expect(`${left} ${maybe(left).join()}`).toBe(`${left} true`)
+  }
+})
+
+test('a `case` hides where a command run to make a word ends only where a command may stand in it: one in a path or an argument is a word', () => {
+  const read = (command: string): string[] => findFleetRuns(command).map(run => `${run.spec ?? '?'} ${run.out ?? '?'} ${run.isMaybe === true ? 'maybe' : 'sure'}`)
+
+  for (const plain of ['echo "$(cat /w/case.md)"', 'X=$(basename /w/case); echo $X', 'echo $(echo case closed)', 'echo $(echo time case)', 'echo "$(echo ! case a; echo -p case b)"', 'echo $(echo noglob case)']) {
+    expect(`${plain} ${read(`${plain}; fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md`).join()}`).toBe(`${plain} /w/a.md /w/b.md sure`)
+  }
+  // Behind a word a pipeline or a command may begin with, it is a `case` all the same: the text it prints may hold what looks like a launch.
+  const printed = 'a in a) echo esac " ; fleet-run codex-build --cwd /w --spec /w/c.md --out /w/d.md ; " ;; esac)"'
+
+  for (const lead of ['!', 'time', 'time -p', '! time', 'time !', 'coproc', 'noglob', 'nocorrect', 'true; ! time -p', 'if', 'f()', 'function f', 'repeat 2', 'for x (a)']) {
+    const runs = findFleetRuns(`echo "$(${lead} case ${printed}`)
+
+    expect(`${lead} ${runs.filter(run => run.isMaybe !== true || run.spec !== undefined || run.specSpan !== undefined).length}`).toBe(`${lead} 0`)
+  }
+  // A backslash before a line's end joins the two lines before any word is read.
+  for (const split of ['ca\\\nse', '\\\ncase', '! \\\ncase', 'ti\\\nme c\\\nase', 'case\\\n']) {
+    const runs = findFleetRuns(`echo "$(${split} ${printed}`)
+
+    expect(`${JSON.stringify(split)} ${runs.filter(run => run.isMaybe !== true || run.spec !== undefined || run.specSpan !== undefined).length}`).toBe(`${JSON.stringify(split)} 0`)
+  }
+  for (const knotty of ['echo "$(case a in b) : ;; esac)"', 'echo $(time case a in a) : ;; esac)', 'echo $(! case a in a) : ;; esac)', 'X=$(case a in b) echo c ;; esac)', 'echo $(true; case a in a) echo b ;; esac)', 'echo $(if true; then case a in a) : ;; esac; fi)']) {
+    expect(`${knotty} ${read(`${knotty}; fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md`).join()}`).toMatch(/maybe$/)
+  }
+})
+
+test('a group, a parenthesis, a loop or a handed script piped on to another command may be ended at what it writes: only a launch in its first statement is sure', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const G = 'fleet-run codex-scout --cwd /w --spec /w/c.md --out /w/d.md'
+  const maybe = (command: string): string => findFleetRuns(command).map(run => `${run.profile === 'codex-build' ? 'F' : 'G'}${run.isMaybe === true ? '?' : ''}`).join(' ')
+
+  for (const [command, read] of [
+    [`{ ${F}; } | tee log`, 'F'],
+    [`(${F}) | tee log`, 'F'],
+    [`{ ${F}; echo done; } | cat`, 'F'],
+    [`sh -c '${F}' | cat`, 'F'],
+    // A statement of no word, or of only the word that opens the group, is not its first.
+    [`sh -c '${F};' | cat`, 'F'],
+    [`sh -c '\n${F}\n' | cat`, 'F'],
+    [`{\n${F};\n} | cat`, 'F'],
+    [`(\n${F}\n) | cat`, 'F'],
+    [`{\n\n  ${F}\n  echo done\n} | tee log`, 'F'],
+    [`{\n  echo hi\n  ${F}\n} | cat`, 'F?'],
+    [`{ echo hi; ${F}; } | ${G}`, 'F? G'],
+    [`(echo hi; ${F}) | cat; ${G}`, 'F? G'],
+    [`{ ${F}; ${G}; } |& cat`, 'F G?'],
+    [`{ { ${F}; echo; ${G}; }; } | cat`, 'F G?'],
+    [`for x in a b; do echo $x; ${F}; done | cat`, 'F? F?'],
+    [`sh -c 'echo hi; ${F}' | cat`, 'F?'],
+    // Not piped on, or the last of the pipeline, each writes to what does not go away.
+    [`{ echo hi; ${F}; }; ${G}`, 'F G'],
+    [`echo a | { echo hi; ${F}; }`, 'F'],
+    [`for x in a b; do echo $x; ${F}; done`, 'F F'],
+    [`bash -c "echo hi; ${F}"`, 'F'],
+  ] as const) {
+    expect(`${command} => ${maybe(command)}`).toBe(`${command} => ${read}`)
+  }
+})
+
+test('an `esac` that ends no `case` read here ends one not seen, as one an alias stands for: no launch before it or after it is sure', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const G = 'fleet-run codex-scout --cwd /w --spec /w/c.md --out /w/d.md'
+  const sure = (command: string): number => findFleetRuns(command).filter(run => run.isMaybe !== true).length
+
+  for (const hidden of [`echo $(c a in a) echo x; ${F}; esac); ${G}`, `c a in a) echo x; ${F}; esac; ${G}`, `sh -c 'c a in a) ${F}; esac; ${G}'`, `eval 'case a in a) ${F};; esac'`, `eval "$X"; ${G}`]) {
+    expect(`${hidden} ${sure(hidden)}`).toBe(`${hidden} 0`)
+  }
+  // After the hidden one ends, no path is taken as read.
+  expect(findFleetRuns(`echo $(c a in a) echo x; ${F}; esac); ${G}`).at(-1)?.spec).toBeUndefined()
+  // The word as an argument is a word like any other, and a `case` that is read ends at its own.
+  for (const plain of [`echo esac; ${F}`, `echo case esac; ${F}`, `${F}; case a in a) echo b;; esac`]) {
+    expect(`${plain} ${sure(plain)}`).toBe(`${plain} 1`)
+  }
+})
+
+test('a word that ends a block, or goes on with one, where no such block was read belongs to one not seen: no launch before it or after it is sure', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const G = 'fleet-run codex-scout --cwd /w --spec /w/c.md --out /w/d.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.profile === 'codex-build' ? 'F' : 'G'}${run.isMaybe === true ? '?' : ''}`).join(' ')
+
+  for (const hidden of [`w false; do ${F}; done; ${G}`, `i false; then ${F}; fi; ${G}`, `i false; then echo a; else ${F}; fi; ${G}`, `g ${F}; }; ${G}`, `${F}; done`, `${F}; fi; ${G}`, `sh -c 'w false; do ${F}; done'; ${G}`, `if true; then ${F}; done; ${G}`, `{ ${F}; fi; ${G}`]) {
+    expect(`${hidden} => ${read(hidden).replace(/[FG]\?/g, '').trim()}`).toBe(`${hidden} => ${hidden.startsWith('sh -c') ? 'G' : ''}`)
+  }
+  // Blocks that are read, each ended by its own word, and the same words as arguments, in quotes or in a here-document, are as they were.
+  for (const [command, runs] of [
+    [`for x in a b; do ${F}; done; ${G}`, 'F F G'],
+    [`for x in a b\ndo\n  ${F}\ndone\n${G}`, 'F F G'],
+    [`while false; do ${F}; done; ${G}`, 'F? G'],
+    [`until true; do echo a; done; ${G}`, 'G'],
+    [`if true; then ${F}; elif false; then echo b; else echo c; fi; ${G}`, 'F? G'],
+    [`{ ${F}; }; ${G}`, 'F G'],
+    [`{ if true; then echo a; fi; while false; do echo b; done; }; ${G}`, 'G'],
+    [`echo done fi then do else elif esac; ${F}`, 'F'],
+    [`echo 'done'; echo "fi"; echo }; ${F}`, 'F'],
+    [`cat <<EOF\ndone\nfi\n}\nesac\nEOF\n${F}`, 'F'],
+    [`select x in a b; do echo $x; break; done; ${G}`, 'G'],
+  ] as const) {
+    expect(`${command} => ${read(command)}`).toBe(`${command} => ${runs}`)
+  }
+  // A function's body is not read, and what follows a definition is not sure as before.
+  expect(read(`f() { if true; then echo a; fi; }; ${G}`)).toBe('G?')
+})
+
+test('a `case` after a `]]` in a command run to make a word is one all the same, as in a short `if` of zsh', () => {
+  const printed = 'a in a) echo esac " ; fleet-run codex-build --cwd /w --spec /w/c.md --out /w/d.md ; " ;; esac)"'
+  const runs = findFleetRuns(`echo "$(if [[ -n x ]] case ${printed}`)
+
+  expect(runs.filter(run => run.isMaybe !== true || run.spec !== undefined || run.specSpan !== undefined).length).toBe(0)
+  // A test with no `case` after it hides nothing.
+  expect(findFleetRuns('echo "$([[ -n x ]] && echo case)"; fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md').map(run => `${run.spec ?? '?'} ${run.isMaybe === true ? 'maybe' : 'sure'}`)).toEqual(['/w/a.md sure'])
+})
+
+test('a launch whose name or words are written over two lines, joined by a backslash, is read as the same launch written on one', () => {
+  const whole = findFleetRuns('fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md').map(({ specSpan: _span, ...run }) => run)
+
+  for (const split of ['fleet-\\\nrun codex-build --cwd /w --spec /w/a.md --out /w/b.md', 'fle\\\net-run codex-build --cwd /w --sp\\\nec /w/a.md --out /w/b\\\n.md', 'fleet-run \\\n  codex-build --cwd /w \\\n  --spec /w/a.md --out /w/b.md']) {
+    expect(findFleetRuns(split).map(({ specSpan: _span, ...run }) => run)).toEqual(whole)
+  }
+  expect(whole.map(run => `${run.spec ?? '?'} ${run.out ?? '?'} ${run.isMaybe === true ? 'maybe' : 'sure'}`)).toEqual(['/w/a.md /w/b.md sure'])
+})
+
+test('an `esac` anywhere after a command run to make a word opens may end a `case` not seen in it: nothing in the command is sure, and no path is read', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string): string[] => findFleetRuns(command).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '?'} ${run.specSpan === undefined ? 'unplaced' : 'placed'}`)
+
+  // Behind an alias the `case` is not seen: the text it prints holds what looks like a launch, outside where the reader ends the command.
+  for (const hidden of [`echo "$(c a in a) echo esac " ; ${F} ; " ;; esac)"`, `echo "$(c a in a) echo es\\\nac " ; ${F} ; " ;; esac)"`, `echo \`c a in a) echo x ;; esac\`; ${F}`]) {
+    expect(`${hidden} ${read(hidden).join()}`).toBe(`${hidden} maybe ? unplaced`)
+  }
+  // The word as an argument there is taken the same way: what is lost is only that the launch is sure.
+  for (const argued of [`echo "$(grep -c esac /w/notes.md)"; ${F}`, `${F}; echo $(echo esac)`]) {
+    expect(`${argued} ${read(argued).join()}`).toBe(`${argued} maybe ? unplaced`)
+  }
+  // With no such command before it, the word is a word.
+  for (const plain of [`echo esac; ${F}`, `grep -c esac /w/notes.md; ${F}`, `echo esac; echo "$(date)"; ${F}`]) {
+    expect(`${plain} ${read(plain).join()}`).toBe(`${plain} sure /w/a.md placed`)
+  }
+})
+
+test('a loop or an `if` left running behind or piped on runs in a shell of its own: a word that leaves, in it, passes no later launch by', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): (true | undefined)[] => findFleetRuns(command).map(run => run.isMaybe)
+
+  for (const sure of [`while true; do exit 0; done | cat; ${F}`, `for x in a; do exit 0; done & ${F}`, `for x in $L; do exit 0; done & ${F}`, `until false; do exit 0; done |& cat; ${F}`, `select x in a; do exit 0; done | cat; ${F}`, `if true; then exit 0; fi | cat; ${F}`]) {
+    expect(`${sure} ${maybe(sure).join()}`).toBe(`${sure} `)
+  }
+  for (const left of [`while true; do exit 0; done; ${F}`, `for x in a; do exit 0; done; ${F}`, `for x in $L; do exit 0; done; ${F}`, `echo | while true; do exit 0; done; ${F}`, `if true; then exit 0; fi; ${F}`, `exit 0; while false; do echo a; done | cat; ${F}`]) {
+    expect(`${left} ${maybe(left).join()}`).toBe(`${left} true`)
+  }
+})
+
+test('a loop whose `do` stands on a line of its own is read as one written on one line: each round with its paths, and the shell not lost', () => {
+  const read = (command: string): string[] => findFleetRuns(command).map(run => `${run.profile} ${run.spec ?? '?'} ${run.out ?? '?'} ${run.isMaybe === true ? 'maybe' : 'sure'}`)
+  const body = 'fleet-run codex-build --cwd /w --spec /w/$x.md --out /w/$x.out.md'
+  const after = 'fleet-run codex-scout --cwd /w --spec /w/c.md --out /w/d.md'
+  const rounds = ['codex-build /w/a.md /w/a.out.md sure', 'codex-build /w/b.md /w/b.out.md sure', 'codex-scout /w/c.md /w/d.md sure']
+
+  for (const loop of [`for x in a b; do ${body}; done; ${after}`, `for x in a b;\ndo\n  ${body}\ndone\n${after}`, `for x in a b\ndo\n  ${body}\ndone\n${after}`, `for x in a b\n\ndo ${body}\ndone; ${after}`, `for x in a b;\n# each\ndo\n\n  ${body}\n\ndone\n${after}`]) {
+    expect(`${JSON.stringify(loop)} ${read(loop).join()}`).toBe(`${JSON.stringify(loop)} ${rounds.join()}`)
+  }
+  // A loop that is not gone through here has its `do` in it all the same: what follows it is sure.
+  for (const loop of [`while false\ndo\n  echo a\ndone\n${after}`, `until true;\ndo\n  echo a\ndone\n${after}`, `for x in $L\ndo\n  echo $x\ndone\n${after}`]) {
+    expect(`${JSON.stringify(loop)} ${read(loop).join()}`).toBe(`${JSON.stringify(loop)} codex-scout /w/c.md /w/d.md sure`)
+  }
+  // One that stands in no loop, after a statement, belongs to a loop not seen.
+  expect(read(`w false; do ${after}; done`)).toEqual(['codex-scout ? ? maybe'])
+})
+
+test('a launch exits as its command does only where it is the last thing the command runs, alone: in no pipeline, behind no `!`, in no block, with nothing after it', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const owns = (command: string): string => findFleetRuns(command).map(run => (run.ownsExit === true ? 'own' : 'not')).join()
+
+  for (const last of [F, `cd /w; ${F}`, `cd /w && ${F}`, `echo a\n${F}\n# done\n`, `${F} > /w/log 2>&1`, `nohup ${F}`, `env X=1 ${F}`, `timeout 600 ${F}`, `(cd /w; ${F})`, `sh -c '${F}'`, `bash -lc "cd /w && ${F}"`, `echo a | cat; ${F};`, `{ ${F}; }`, `{ cd /w; ${F}; }`, `{\n  ${F}\n} 2>/w/log`, `{ { ${F}; }; }`]) {
+    expect(`${last} ${owns(last)}`).toBe(`${last} own`)
+  }
+  for (const other of [`${F} || true`, `${F} 2>&1 | tail -5`, `${F}; echo done`, `${F} && echo ok`, `if ${F}; then echo ok; fi`, `! ${F}`, `${F} &`, `echo a | ${F}`, `{ ${F}; } | cat`, `{ ${F}; }; echo done`, `{ ${F}; } || true`, `(${F}) | cat`, `(${F}) &`, `{ ${F}; } &`, `if true; then { ${F}; }; fi`, `for x in a; do ${F}; done`, `echo $(${F})`, `sh -c '${F}; echo done'`, `sh -c '${F}' | cat`, `sh -c '${F}'; echo done`, `while ${F}; do sleep 1; done`]) {
+    expect(`${other} ${owns(other)}`).toBe(`${other} not`)
+  }
+  // Behind a `!`, a parenthesis, a group or a pipeline exits as the other of what it ran: no launch in it, however deep, exits as the command does.
+  for (const turned of [`! ( ${F} )`, `! (${F})`, `! ( true; ${F} )`, `! ( ( ${F} ) )`, `time ! ( ${F} )`, `! ( ${F} ) 2>&1`, `set -e; ! ( ${F} )`, `! ${F}`, `! { ${F}; }`, `! { true; ${F}; }`, `! { true; ( ${F} ); }`, `! { true; { ${F}; }; }`, `! ( { ${F}; } )`, `! ( sh -c '${F}' )`, `! true | ( ${F} )`]) {
+    expect(`${turned} ${owns(turned)}`).toBe(`${turned} not`)
+  }
+  // One that follows what the `!` turns, or stands in a parenthesis with a `!` of its own inside, is not behind it.
+  for (const past of [`! (true); (${F})`, `! { true; }; ( ${F} )`, `! true; ( ${F} )`, `( ! true; ${F} )`, `( ( ${F} ) )`]) {
+    expect(`${past} ${owns(past)}`).toBe(`${past} own`)
+  }
+  // An `exec` that surely runs takes the shell's place: what is written after it never runs, and the command exits as the launch does.
+  for (const taking of [`exec ${F}; echo x`, `exec ${F}\necho x`, `cd /w; exec ${F}; echo x`, `exec nohup ${F}; echo x`, `exec env X=1 ${F}; echo x`, `exec ${F} && echo ok`, `exec ${F} || echo no`, `set -e; exec ${F}; echo x`]) {
+    expect(`${taking} ${owns(taking)}`).toBe(`${taking} own`)
+  }
+  // Not where it may not run, or runs in a shell of its own. After `cd /w &&` a failing `cd` skips it and `echo x` ends the command with 0.
+  // In a group it is not followed: the group may be piped or redirected where it closes. With a redirection of its own, bash and
+  // zsh go on past one that fails: `exec F > /no/such/file; echo x` launches nothing and exits 0.
+  for (const kept of [`cd /w && exec ${F}; echo x`, `false || exec ${F}; echo x`, `{ exec ${F}; }; echo x`, `exec ${F} | cat`, `exec ${F} | cat; echo x`, `cat /w/a | exec ${F}; echo x`, `(exec ${F}); echo x`, `exec ${F} & echo x`, `if true; then exec ${F}; fi; echo x`, `for x in a; do exec ${F}; done; echo x`, `exec ${F} > /w/log; echo x`, `exec ${F} < /w/in; echo x`, `command exec ${F}; echo x`, `nohup exec ${F}; echo x`, `! exec ${F}; echo x`, `time exec ${F}; echo x`]) {
+    expect(`${kept} ${owns(kept)}`).toBe(`${kept} not`)
+  }
+  expect(owns(`exec ${F} > /w/log`)).toBe('own')
+  // A script the `exec` hands to a shell takes the shell's place as well: its last launch owns the exit, by the script's own rules.
+  for (const handed of [`exec sh -c '${F}'; echo x`, `exec bash -lc "cd /w; ${F}"; echo x`]) {
+    expect(`${handed} ${owns(handed)}`).toBe(`${handed} own`)
+  }
+  for (const kept of [`exec sh -c '${F}; echo y'; echo x`, `exec bash -c '${F}' > /w/log; echo x`, `sh -c '${F}'; echo x`, `cd /w && exec sh -c '${F}'; echo x`, `exec sh -c '${F}' | cat; echo x`]) {
+    expect(`${kept} ${owns(kept)}`).toBe(`${kept} not`)
+  }
+  // Sure or not as before: owning the exit changes nothing of that.
+  expect(findFleetRuns(`exec ${F}; echo x`).map(run => run.isMaybe === true)).toEqual([false])
+  expect(findFleetRuns(`cd /w && exec ${F}; echo x`).map(run => run.isMaybe === true)).toEqual([true])
+})
+
+test('a launch in `<(…)` or `>(…)` is left running behind, wherever it stands: the shell does not wait for it, and it does not exit as the command does', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.isBackground ? 'behind' : 'waited'}${run.ownsExit === true ? ' own' : ''}`).join()
+
+  for (const aside of [`sleep 1; true <(${F} >/dev/null 2>&1)`, `cat <(${F})`, `echo x | tee >(${F})`, `cat < <(${F})`, `echo x > >(${F})`, `while read x; do :; done < <(${F})`, `(cat <(${F}))`, `x=$(cat <(${F}))`, `bash -c 'cat <(${F})'`, `bash -c "cat <(${F})"`]) {
+    expect(`${aside} ${read(aside)}`).toBe(`${aside} behind`)
+  }
+  expect(read(`diff <(${F}) <(${F})`)).toBe('behind,behind')
+  // A command run to make a word is waited for, and one in quotes is only text.
+  expect(read(`echo $(${F})`)).toBe('waited')
+  expect(read(`cat < $(${F})`)).toBe('waited')
+  expect(read(`echo '<(${F})'`)).toBe('')
+})
+
+test('a parenthesis where a redirection looks for its word opens no shell of its own: a launch in it is left running behind, and is sure only right after `<<`', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.isBackground ? 'behind' : 'waited'}${run.ownsExit === true ? ' own' : ''}`).join()
+
+  // zsh reads `<<(…)` as `< <(…)`, and bash runs nothing and fails.
+  expect(read(`cat <<(${F})`)).toBe('sure behind')
+  // After a space, or any other sign, bash runs nothing and zsh runs it or not.
+  for (const odd of [`cat << (${F})`, `cat < (${F})`, `cat > (${F})`, `cat >> (${F})`, `cat >>(${F})`, `cat <<<(${F})`, `cat 2> (${F})`, `echo a &> (${F})`]) {
+    expect(`${odd} ${read(odd)}`).toBe(`${odd} maybe behind`)
+  }
+  // A parenthesis that begins a statement is a shell of its own, as before.
+  for (const plain of [`(${F})`, `cat < /w/f; (${F})`, `cat <<EOF\nhi\nEOF\n(${F})`]) {
+    expect(`${plain} ${read(plain)}`).toBe(`${plain} sure waited own`)
+  }
+})
+
+test('a command of a hundred thousand lines is read in time that grows with its length, not with its square', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const took = (command: string): number => {
+    const times = [0, 0].map(() => {
+      const from = performance.now()
+
+      expect(findFleetRuns(command)).toHaveLength(1)
+
+      return performance.now() - from
+    })
+
+    return Math.min(...times)
+  }
+
+  for (const [name, command] of [
+    ['lines', `${':\n'.repeat(100_000)}${F}`],
+    ['lines after', `${F}\n${':\n'.repeat(100_000)}`],
+    ['and-or', `${': && '.repeat(100_000)}${F}`],
+    // A long run of line ends inside a command run to make a word, and a long word given to `set`.
+    ['line ends in $(', `${'$('.repeat(8)}${'\n'.repeat(16_000)}true${')'.repeat(8)}\n${F}`],
+    ['set flag', `set -${'e'.repeat(50_000)}!; ${F}`],
+  ] as const) {
+    expect(`${name} ${took(command) < 1500 ? 'in time' : 'too slow'}`).toBe(`${name} in time`)
+  }
+})
+
+test('a command with more parentheses open at once than is read tells of no launch, and at once: one a little less deep is read as ever', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const nested = (depth: number): string => `echo ${'$('.repeat(depth)}true${')'.repeat(depth)}; ${F}`
+  const from = performance.now()
+
+  expect(findFleetRuns(nested(8000))).toEqual([])
+  expect(findFleetRuns(nested(125_000))).toEqual([])
+  expect(findFleetRuns(`echo ${'$('.repeat(8000)}${F}${')'.repeat(8000)}`)).toEqual([])
+  expect(performance.now() - from < 500 ? 'in time' : 'too slow').toBe('in time')
+  expect(findFleetRuns(nested(100)).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '-'}`)).toEqual(['sure /w/a.md'])
+  // Many opened one after another are not deep.
+  expect(findFleetRuns(`echo${' $(true)'.repeat(1000)}; ${F}`).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '-'}`)).toEqual(['sure /w/a.md'])
+})
+
+test('a script handed on inside a script handed on, many times over, is looked through once at each depth: the reading does not double with each, and one that would take too long is given up with no launch told', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const wraps: Record<string, (script: string) => string> = {
+    'sh -c "$(…)"': script => `sh -c "$(${script})"`,
+    'sh -c "`…`"': script => `sh -c "\`${script}\`"`,
+    'bash -lc "$(…)"': script => `bash -lc "$(${script})"`,
+    'orca terminal create --command "$(…)"': script => `orca terminal create --command "$(${script})"`,
+    'a word of both': script => `sh -c $(${script})"$(${script.length > 40 ? 'true' : script})"`,
+  }
+
+  for (const [name, wrap] of Object.entries(wraps)) {
+    for (const depth of [20, 40]) {
+      const command = `${Array.from({ length: depth }).reduce<string>(wrap, "echo 'esac'")}; ${F}`
+      const from = performance.now()
+      const runs = findFleetRuns(command)
+      const took = performance.now() - from
+
+      expect(`${name} ${depth} ${took < 200 ? 'in time' : 'too slow'}`).toBe(`${name} ${depth} in time`)
+      // Read through, the launch after them is found; given up, none is. Never one told as sure with what stands before it unread.
+      expect(runs.length <= 1).toBe(true)
+    }
+  }
+  // Long text deep inside commands run to make a word is parted again at each depth: past what a reading is given, it is given up.
+  const from = performance.now()
+
+  expect(findFleetRuns(`echo ${'$('.repeat(190)}${'a '.repeat(100_000)}${')'.repeat(190)}; ${F}`)).toEqual([])
+  expect(performance.now() - from < 1500 ? 'in time' : 'too slow').toBe('in time')
+  // The same wrapped a few times is read as ever.
+  expect(findFleetRuns(`sh -c "$(sh -c "$(echo 'esac')")"; ${F}`).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '-'}`)).toEqual(['sure /w/a.md'])
+  expect(findFleetRuns(`sh -c "$(sh -c "$(case a in a) echo;; esac)")"; ${F}`).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '-'}`)).toEqual(['maybe -'])
+})
+
+test('a redirection alone after `&&`, `||` or `|` is a command of its own, which its line ends: the launch on the next line surely runs, whatever stands between the redirection and the line end', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '-'} ${run.ownsExit === true ? 'owns' : 'not'}`).join()
+
+  // bash, zsh and sh each run the next line after every one of these.
+  for (const line of ['false && > /dev/null ', 'false && >/dev/null', 'false && > /dev/null', 'false && 2>/dev/null ', 'false && 2> /dev/null\t', 'false || <in ', 'false && >f', 'false && >f ', 'false && > /dev/null # note', 'true | > /dev/null ', 'false && <<EOF \nbody\nEOF', 'false && > /dev/null 2>&1 ']) {
+    expect(`${JSON.stringify(line)} ${read(`${line}\n${F}`)}`).toBe(`${JSON.stringify(line)} sure /w/a.md owns`)
+  }
+  // With nothing after the sign the line goes on in the next, as ever: the launch is hung on it.
+  for (const line of ['false && ', 'false &&', 'false || \t', 'false && # note']) {
+    expect(`${JSON.stringify(line)} ${read(`${line}\n${F}`)}`).toBe(`${JSON.stringify(line)} maybe /w/a.md owns`)
+  }
+})
+
+test('a command of a quarter of a million characters is read in time that grows with its length, whatever it is made of: blocks in blocks, long chains, many statements, here-documents, words or options', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  /** Each form, with how many launches are read of it: none where more blocks stand open at once than are read. */
+  const forms: [string, string, number][] = [
+    ['groups in groups', `${'{ '.repeat(50_000)}${F}${'; }'.repeat(50_000)}`, 0],
+    ['parentheses in parentheses', `${'( '.repeat(50_000)}${F}${' )'.repeat(50_000)}`, 0],
+    ['commands run to make words, in one another', `echo ${'$('.repeat(60_000)}${F}${')'.repeat(60_000)}`, 0],
+    ['if in if', `${'if true; then '.repeat(12_000)}${F}${'; fi'.repeat(12_000)}`, 0],
+    ['while in while', `${'while true; do '.repeat(12_000)}${F}${'; done'.repeat(12_000)}`, 0],
+    ['for in for', `${'for a in b; do '.repeat(12_000)}${F}${'; done'.repeat(12_000)}`, 0],
+    ['case in case', `${'case a in a) '.repeat(12_000)}${F}${';; esac'.repeat(12_000)}`, 0],
+    ['if after if', `${'if true; then :; fi; '.repeat(12_000)}${F}`, 1],
+    ['while after while', `${'while false; do :; done; '.repeat(10_000)}${F}`, 1],
+    ['for after for', `${'for a in b; do :; done; '.repeat(10_000)}${F}`, 1],
+    ['case after case', `${'case a in a) :;; esac; '.repeat(10_000)}${F}`, 1],
+    ['group after group', `${'{ :; }; '.repeat(30_000)}${F}`, 1],
+    ['parenthesis after parenthesis', `${'( : ); '.repeat(35_000)}${F}`, 1],
+    ['functions', `${'f() { :; }; '.repeat(20_000)}${F}`, 1],
+    ['a chain of &&', `${': && '.repeat(50_000)}${F}`, 1],
+    ['a chain of ||', `${': || '.repeat(50_000)}${F}`, 1],
+    ['a pipeline', `${': | '.repeat(60_000)}${F}`, 1],
+    ['commands left behind', `${': & '.repeat(60_000)}${F}`, 1],
+    ['statements on one line', `${':; '.repeat(80_000)}${F}`, 1],
+    ['here-documents', `${'cat <<EOF\nx\nEOF\n'.repeat(15_000)}${F}`, 1],
+    ['quoted words', `echo${' \'a\' "b"'.repeat(30_000)}; ${F}`, 1],
+    ['assignments before a command', `${'A=1 '.repeat(60_000)}${F}`, 1],
+    ['assignments', `${'A=1; '.repeat(50_000)}${F}`, 1],
+    ['redirections', `echo${' >f'.repeat(80_000)}; ${F}`, 1],
+    ['wrappers', `${'nohup '.repeat(40_000)}${F}`, 1],
+    ['launches', `${`${F}; `.repeat(3500)}:`, 3500],
+    ['an option given over and over', `${F}${' --timeout-min 5'.repeat(15_000)}`, 1],
+    ['scripts handed on', `${"sh -c ':'; ".repeat(22_000)}${F}`, 1],
+    ['tests', `${'[[ -n x ]]; '.repeat(20_000)}${F}`, 1],
+    ['patterns of a case', `case a in ${'a) :;; '.repeat(35_000)}esac; ${F}`, 1],
+    ['backquotes', `echo${' `x`'.repeat(50_000)}; ${F}`, 1],
+  ]
+
+  for (const [name, command, count] of forms) {
+    const from = performance.now()
+    const runs = findFleetRuns(command)
+    const took = performance.now() - from
+
+    expect(`${name} ${runs.length} ${took < 500 ? 'in time' : 'too slow'}`).toBe(`${name} ${count} in time`)
+  }
+})
+
+test('blocks open in one another are read to two hundred deep, of any kind: past that the command is not read at all, and no launch is told of it', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '-'}`).join()
+  const nests: [string, string, string, string][] = [
+    ['{ ', '; }', 'sure /w/a.md', '{'],
+    ['if true; then ', '; fi', 'maybe /w/a.md', 'if'],
+    ['while true; do ', '; done', 'maybe /w/a.md', 'while'],
+    ['for a in b; do ', '; done', 'maybe /w/a.md', 'for'],
+    ['case a in a) ', ';; esac', 'maybe -', 'case'],
+  ]
+
+  for (const [opens, closes, shallow, name] of nests) {
+    expect(`${name} ${read(`${opens.repeat(150)}${F}${closes.repeat(150)}`)}`).toBe(`${name} ${shallow}`)
+    // The innermost few of a `for` in a `for` are read over again as loops, each a reading of its own: those count from none.
+    expect(`${name} ${read(`${opens.repeat(name === 'for' ? 700 : 250)}${F}${closes.repeat(name === 'for' ? 700 : 250)}`)}`).toBe(`${name} `)
+  }
+  // Kinds mixed count together, and blocks one after another do not count at all.
+  expect(read(`${'{ if true; then '.repeat(125)}${F}${'; fi; }'.repeat(125)}`)).toBe('')
+  expect(read(`${'{ :; }; '.repeat(1000)}${F}`)).toBe('sure /w/a.md')
+})
+
+test('a statement of very many words after a command run to make a word, with an `esac` in it, is looked through for scripts handed on in time that grows with its length', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const took = (command: string): number => {
+    const times = [0, 0].map(() => {
+      const from = performance.now()
+
+      expect(findFleetRuns(command)).toHaveLength(1)
+
+      return performance.now() - from
+    })
+
+    return Math.min(...times)
+  }
+
+  // About 250 KiB each: plain words, shells with nothing handed on, and Orca terminals with no `--command` or with one far off.
+  for (const [name, command] of [
+    ['words', `echo $(echo "esac")${' a'.repeat(125_000)}; ${F}`],
+    ['shells', `echo $(echo "esac")${' sh'.repeat(83_000)}; ${F}`],
+    ['shells with options', `echo $(echo "esac")${' sh -x'.repeat(42_000)}; ${F}`],
+    ['terminals', `echo $(echo "esac")${' orca terminal create'.repeat(12_000)}; ${F}`],
+    ['terminals before a command', `echo $(echo "esac")${' orca terminal create'.repeat(12_000)} --command 'true'; ${F}`],
+    // Very many commands run to make words, and very many that redirections lead to, in one statement.
+    ['commands in words', `echo $(echo "esac")${' $(x)'.repeat(50_000)}; ${F}`],
+    ['commands redirected to', `echo $(echo "esac")${' <(x)'.repeat(50_000)}; ${F}`],
+  ] as const) {
+    expect(`${name} ${took(command) < 500 ? 'in time' : 'too slow'}`).toBe(`${name} in time`)
+  }
+})
+
+test('an `&` that closes `a && b` leaves both running behind to bash and only `b` to zsh: read as zsh does only where the shell is known to be zsh', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const G = 'fleet-run codex-scout --cwd /w --spec /w/c.md --out /w/d.md'
+  const read = (command: string, tool?: 'zsh' | 'bash'): string =>
+    findFleetRuns(command, undefined, tool)
+      .map(run => `${run.profile === 'codex-build' ? 'F' : 'G'}${run.isBackground ? '&' : ''}${run.isMaybe === true ? '?' : ''}${run.ownsExit === true ? '!' : ''}`)
+      .join(' ')
+
+  // What stands before the last pipeline is waited for by zsh: it is sure or not as anywhere, and does not exit as the command does.
+  for (const [command, safe, zsh] of [
+    [`${F} && echo done &`, 'F&', 'F'],
+    [`${F} || ${G} &`, 'F& G&?', 'F G&?'],
+    [`true; ${F} && ${G} &`, 'F& G&?', 'F G&?'],
+    [`${F} && ${G} | cat &`, 'F& G&?', 'F G&?'],
+    [`${F} | cat && ${G} &`, 'F& G&?', 'F G&?'],
+    [`${F} &&\n${G} &`, 'F& G&?', 'F G&?'],
+    [`${F} && { ${G}; } &`, 'F& G&?', 'F G&?'],
+    [`${F} && ( ${G} ) &`, 'F& G&?', 'F G&?'],
+    [`{ ${F}; } && ${G} &`, 'F& G&?', 'F G&?'],
+    [`( ${F} ) && ${G} &`, 'F& G&?', 'F G&?'],
+    [`${F} && true && ${G} &`, 'F& G&?', 'F G&?'],
+    [`cd /w && ${F} && ${G} &`, 'F&? G&?', 'F? G&?'],
+    [`if true; then ${F} && ${G} & fi`, 'F&? G&?', 'F? G&?'],
+    [`echo $(${F} && ${G} &)`, 'F& G&?', 'F G&?'],
+    [`zsh -c '${F} && ${G} &'`, 'F& G&?', 'F G&?'],
+  ] as const) {
+    expect(`${command} ${read(command)}`).toBe(`${command} ${safe}`)
+    expect(`${command} ${read(command, 'bash')}`).toBe(`${command} ${safe}`)
+    expect(`${command} ${read(command, 'zsh')}`).toBe(`${command} ${zsh}`)
+  }
+  // Where the two read alike, or the script is handed to another shell, knowing changes nothing.
+  for (const [command, both] of [
+    [`${F} &`, 'F&'],
+    [`${F} | cat &`, 'F&'],
+    [`cd /w && ${F} &`, 'F&?'],
+    [`{ ${F} && ${G}; } &`, 'F& G&?'],
+    [`( ${F} && ${G} ) &`, 'F& G&?'],
+    [`bash -c '${F} && ${G} &'`, 'F& G&?'],
+    [`sh -c '${F} && ${G} &'`, 'F& G&?'],
+    [`${F} && ${G}`, 'F G?!'],
+  ] as const) {
+    expect(`${command} ${read(command)}`).toBe(`${command} ${both}`)
+    expect(`${command} ${read(command, 'zsh')}`).toBe(`${command} ${both}`)
+  }
+})
+
+test('an `esac` after a command run to make a word unties what is read only where it is a word of its own: in a comment, in quotes or in a here-document it is text', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '-'}`).join()
+
+  for (const text of [`X=$(printf ok); ${F} # esac`, `X=$(printf ok); echo 'esac'; ${F}`, `X=$(printf ok); echo "an esac"; ${F}`, `X=$(printf ok); cat <<EOF\nesac\nEOF\n${F}`, `X=$(echo "esac"); ${F}`, `X=$(echo 'a) esac'); ${F}`, `${F}; X=$(echo) # esac`]) {
+    expect(`${JSON.stringify(text)} ${read(text)}`).toBe(`${JSON.stringify(text)} sure /w/a.md`)
+  }
+  // A real one, in the command or after it, in backquotes, in double quotes or in a script handed on, still does; so does a bare word.
+  for (const real of [`X=$(case a in a) echo;; esac); ${F}`, `X=$(case a in (a) echo;; esac); ${F}`, 'X=`case a in a) echo;; esac`; ' + F, `echo "$(case a in a) echo;; esac)"; ${F}`, `sh -c 'X=$(case a in a) echo;; esac); ${F}'`, `X=$(echo); c a in a) : ;; esac; ${F}`, `X=$(printf ok); echo esac; ${F}`, `X=$(echo ok) \\\nesac; ${F}`]) {
+    expect(`${JSON.stringify(real)} ${read(real)}`).toBe(`${JSON.stringify(real)} maybe -`)
+  }
+})
+
+test('an `esac` in a quoted word unties what is read only where the word is handed on to be run: one that is only printed or passed along is text', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.isMaybe === true ? 'maybe' : 'sure'} ${run.spec ?? '-'}`).join()
+
+  for (const text of [`echo '$(echo esac)'; ${F}`, `echo '$(case a in a) echo;; esac)'; ${F}`, `printf '%s' 'X=$(echo); esac' > /w/note; ${F}`, `git commit -m 'fix $(case…esac) reading'; ${F}`, `X='$(echo esac)'; ${F}`]) {
+    expect(`${JSON.stringify(text)} ${read(text)}`).toBe(`${JSON.stringify(text)} sure /w/a.md`)
+  }
+  // Handed to a shell or to an Orca terminal, behind a wrapper or a name given a value or not, it is a script, and still unties.
+  for (const real of [`${F}; sh -c 'X=$(case a in a) echo;; esac)'`, `${F}; bash -lc 'X=$(case a in a) echo;; esac)'`, `${F}; env A=1 nohup zsh -c 'X=$(case a in a) echo;; esac)'`, `${F}; orca terminal create --command 'X=$(case a in a) echo;; esac)'`, `${F}; A=1 sh -c 'X=$(echo); esac'`]) {
+    expect(`${JSON.stringify(real)} ${read(real)}`).toBe(`${JSON.stringify(real)} maybe -`)
+  }
+})
+
+test('a shell told to leave at the first command that fails may be gone past any redirection, whatever its command or with none, and past an assignment of what a command makes: a launch after one is not sure', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): string => findFleetRuns(command).map(run => (run.isMaybe === true ? 'maybe' : 'sure')).join()
+
+  // bash, zsh and sh each leave at every one of these where the file cannot be opened, or the command run for the value fails.
+  for (const failing of [': >/nonexist/log', 'true >/nonexist/log', '>/nonexist/log', 'x=1 >/nonexist/log', ': <nofile', 'true 2>/nonexist/log', ': >>/nonexist/log', 'x=$(false)', 'x=`false`', 'x=1 y=$(false)', 'x=$(false) y=2', 'x=${y?}']) {
+    expect(`${failing} ${maybe(`set -e; ${failing}; ${F}`)}`).toBe(`${failing} maybe`)
+    expect(`${failing} on lines ${maybe(`set -e\n${failing}\n${F}`)}`).toBe(`${failing} on lines maybe`)
+  }
+  // With no redirection, a command that only answers yes and a name given what is written out cannot fail; nor does any of these
+  // where the shell was not told to leave, or the failing is only asked after.
+  for (const plain of [`set -e; :; ${F}`, `set -e; true; ${F}`, `set -e; x=1; ${F}`, `set -e; x=1 y=/w; ${F}`, `: >/nonexist/log; ${F}`, `>/nonexist/log; ${F}`, `x=$(false); ${F}`, `set -e; : >/nonexist/log || true; ${F}`, `set -e; if : >/nonexist/log; then :; fi; ${F}`, `set -e; set +e; : >/nonexist/log; ${F}`]) {
+    expect(`${plain} ${maybe(plain)}`).toBe(`${plain} sure`)
+  }
+})
+
+test('a shell told to leave at the first command that fails may be gone past any command: a launch after one is not sure', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): string => findFleetRuns(command).map(run => (run.isMaybe === true ? 'maybe' : 'sure')).join()
+
+  for (const strict of [`set -e; test -f /nope; ${F}`, `set -eu\ncd /w\n${F}`, `set -o errexit; cd /w; ${F}`, `set -xe; cd /w; ${F}`, `set -euo pipefail; cd /w; ${F}`, `set -e; ${F}; ${F}`.replace(/^/, ''), `set -e; (cd /w); ${F}`, `bash -c 'set -e; cd /w; ${F}'`]) {
+    expect(`${strict} ${maybe(strict).split(',').at(-1)}`).toBe(`${strict} maybe`)
+  }
+  // With no command between, with the telling taken back, or told in another shell, the launch is sure.
+  for (const plain of [`set -e; ${F}`, `set -e\n\n${F}`, `set -e; set +e; cd /w; ${F}`, `set -o errexit; set +o errexit; cd /w; ${F}`, `set -u; cd /w; ${F}`, `set -x; cd /w; ${F}`, `(set -e; cd /w); cd /w; ${F}`, `sh -c 'set -e; true'; cd /w; ${F}`, `set -e; sleep 1 & ${F}`]) {
+    expect(`${plain} ${maybe(plain)}`).toBe(`${plain} sure`)
+  }
+  expect(maybe(`set -e; ${F}; ${F}`)).toBe('sure,maybe')
+  // A loop, a group or an `if` left behind or piped on is told in a shell of its own; one waited for leaves the shell as its end left it.
+  for (const apart of [`for x in a; do set -e; done & false; ${F}`, `for x in $L; do set -e; done & false; ${F}`, `while true; do set -e; break; done | cat; false; ${F}`, `{ set -e; } & false; ${F}`, `if true; then set -e; fi | cat; false; ${F}`, `set -e; for x in a; do set +e; done; false; ${F}`, `for x in a b; do set -e; set +e; done; false; ${F}`]) {
+    expect(`${apart} ${maybe(apart)}`).toBe(`${apart} sure`)
+  }
+  // A command whose failing is only asked after ends no shell: in the condition of an `if` or a loop, before an `&&` or `||`, behind a `!`.
+  for (const asked of [`set -e; if false; then :; fi; ${F}`, `set -e; if false; then :; elif false; then :; fi; ${F}`, `set -e; while false; do :; done; ${F}`, `set -e; until true; do :; done; ${F}`, `set -e; false && true; ${F}`, `set -e; false || true; ${F}`, `set -e; ! true; ${F}`, `set -e; if false && true; then :; fi; ${F}`, `set -e; if false; true; then :; fi; ${F}`, `set -e; while false; false; do :; done; ${F}`, `set -e; if (false); then :; fi; ${F}`, `set -e; if { false; }; then :; fi; ${F}`, `set -e; (false) || true; ${F}`, `set -e; { false && true; }; ${F}`]) {
+    expect(`${asked} ${maybe(asked)}`).toBe(`${asked} sure`)
+  }
+  // The last command of such a list, and what a branch or a body runs, end it as any command does.
+  for (const ending of [`set -e; true && false; ${F}`, `set -e; false || false; ${F}`, `set -e; if true; then false; fi; ${F}`, `set -e; if false; then :; else false; fi; ${F}`, `set -e; while true; do false; done; ${F}`, `set -e; (false && true); ${F}`, `set -e; false && true || false; ${F}`, `set -e; test -f /nope && echo x; ${F}`]) {
+    expect(`${ending} ${maybe(ending)}`).toBe(`${ending} maybe`)
+  }
+  // A pipeline may fail with any element of it, whatever it ends in.
+  for (const piped of [`set -euo pipefail\ngrep -q x /nope | true\n${F}`, `set -euo pipefail; false | :; ${F}`, `set -e -o pipefail; false |& true; ${F}`, `set -o pipefail; set -e; false | true; ${F}`, `set -e; false | true | true; ${F}`, `set -e; { false; } | true; ${F}`, `set -e; false | { true; }; ${F}`, `set -e; (false) | true; ${F}`]) {
+    expect(`${JSON.stringify(piped)} ${maybe(piped)}`).toBe(`${JSON.stringify(piped)} maybe`)
+  }
+  for (const taken of [`set -e; false | true || true; ${F}`, `set -e; false | true && true; ${F}`, `set -e; true | true; ${F}`, `set -e; x=1 | true; ${F}`, `set -e; if false | true; then :; fi; ${F}`, `set -e; ! false | true; ${F}`, `set -e; true | :; true; ${F}`]) {
+    expect(`${taken} ${maybe(taken)}`).toBe(`${taken} sure`)
+  }
+  // Told to leave in an element of a pipeline that is not its last, or left running behind, another shell is told: this one stays.
+  for (const apart of [`set -e | cat; false; ${F}`, `set -e & false; ${F}`, `set -o errexit |& cat; false; ${F}`, `set -eu | cat\nfalse\n${F}`]) {
+    expect(`${apart} ${maybe(apart)}`).toBe(`${apart} sure`)
+  }
+  // The last element of a pipeline zsh runs in this shell, and one that may not run may have run.
+  for (const here of [`cat | set -e; false; ${F}`, `true && set -e; false; ${F}`, `set -e; set -e | cat; false; ${F}`]) {
+    expect(`${here} ${maybe(here)}`).toBe(`${here} maybe`)
+  }
+  // A parenthesis behind a `!` is only asked after, alone or as the first of a pipeline, and whatever fails in it.
+  for (const turned of [`set -e; ! (false); ${F}`, `set -e; ! ( false ) | cat; ${F}`, `set -e; ! ( (false) ); ${F}`, `set -e; ! (true; (false)); ${F}`, `set -e; ! true | (false); ${F}`]) {
+    expect(`${turned} ${maybe(turned)}`).toBe(`${turned} sure`)
+  }
+  for (const failing of [`set -e; (false); ${F}`, `set -e; ! (false); (false); ${F}`, `set -e; (! true; (false)); ${F}`]) {
+    expect(`${failing} ${maybe(failing)}`).toBe(`${failing} maybe`)
+  }
+  // Behind `command` or `builtin`, the telling to stay is not sure: zsh looks for a program of that name.
+  for (const behind of [`set -e; command set +e; false; ${F}`, `set -e; builtin set +e; false; ${F}`, `set -e; command set +o errexit; false; ${F}`]) {
+    expect(`${behind} ${maybe(behind)}`).toBe(`${behind} maybe`)
+  }
+  // Told to stay only where that telling may not run, or runs in another shell, the shell is still told to leave.
+  for (const unsure of [`set -e; true || set +e; false; ${F}`, `set -e; if ! true; then set +e; fi; false; ${F}`, `set -e; if true; then :; else set +e; fi; false; ${F}`, `set -e; until true; do set +e; done; false; ${F}`, `set -e; set +e | cat; false; ${F}`, `set -e; cat | { set +e; }; false; ${F}`, `set -e; if false; then set +e; fi; false; ${F}`, `set -e; true || for x in a; do set +e; done; false; ${F}`, `set -e; set +o errexit & false; ${F}`, `set -e; while true; do set +e; break; done; false; ${F}`]) {
+    expect(`${unsure} ${maybe(unsure)}`).toBe(`${unsure} maybe`)
+  }
+  expect(maybe(`set -e; set +e; false; ${F}`)).toBe('sure')
+  for (const told of [`for x in a; do set -e; done; false; ${F}`, `{ set -e; }; false; ${F}`, `set -e; for x in a; do set +e; done & false; ${F}`]) {
+    expect(`${told} ${maybe(told)}`).toBe(`${told} maybe`)
+  }
+})
+
+test('an `&` that closes a parenthesis, a `{` group or a block leaves every launch in it running behind: none of them ends with the command', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const G = 'fleet-run codex-scout --cwd /w --spec /w/c.md --out /w/d.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.profile === 'codex-build' ? 'F' : 'G'}${run.isBackground ? '&' : ''}${run.ownsExit === true ? '!' : ''}`).join(' ')
+
+  for (const [command, runs] of [
+    [`(${F}) &`, 'F&'],
+    [`( cd /w; ${F} ) &`, 'F&'],
+    [`{ ${F}; } &`, 'F&'],
+    [`{ ${F}; ${G}; } &`, 'F& G&'],
+    [`(${F}; (${G})) &`, 'F& G&'],
+    [`if true; then ${F}; fi &`, 'F&'],
+    [`for x in a b; do ${F}; done &`, 'F& F&'],
+    [`while false; do ${F}; done &\n${G}`, 'F& G!'],
+    [`(${F}) & ${G}`, 'F& G!'],
+    [`${G}; { ${F}; } &`, 'G F&'],
+    // A pipeline closed by an `&` is left behind whole, and so is a list of them joined by `&&` or `||`.
+    [`${F} | cat &`, 'F&'],
+    [`${F} 2>&1 | tail -5 &`, 'F&'],
+    [`${F} |& cat &`, 'F&'],
+    [`{ ${F}; } | cat &`, 'F&'],
+    [`( ${F} ) | cat &`, 'F&'],
+    [`true && ${F} | cat &`, 'F&'],
+    [`${F} && echo done &`, 'F&'],
+    [`${F} || true &`, 'F&'],
+    [`{ ${F}; } && echo &`, 'F&'],
+    [`${F} && ${G} &`, 'F& G&'],
+    [`${G}; ${F} | cat &`, 'G F&'],
+    [`${G}\n${F} && echo done &`, 'G F&'],
+    [`${F} | cat & ${G}`, 'F& G!'],
+    [`{ ${G}; ${F} | cat & }`, 'G F&'],
+    [`(${G}; ${F} && echo ok &)`, 'G F&'],
+    [`if true; then ${G}; fi; ${F} | cat &`, 'G F&'],
+    // An `&` in a group or a block leaves behind only what stands in its own list there, whatever the group stands after.
+    [`${F} && { ${G} & }`, 'F G&'],
+    [`${F} || { ${G} & }`, 'F G&'],
+    [`${F} | { ${G} & }`, 'F G&'],
+    [`${F} && { ${G} & echo b; }`, 'F G&'],
+    [`${F} && { { ${G} & }; }`, 'F G&'],
+    [`${F} && ! { ${G} & }`, 'F G&'],
+    [`${F} && { ${G} &\n}`, 'F G&'],
+    [`{ ${F} && { ${G} & }; }`, 'F G&'],
+    [`${F} && {\n${G} &\n}`, 'F G&'],
+    [`${F} && ( ${G} & )`, 'F G&'],
+    [`${F} && if true; then ${G} & fi`, 'F G&'],
+    [`{ ${F}; ${G} & }`, 'F G&'],
+    [`${F} | { ${G}; } &`, 'F& G&'],
+    [`${F} && { ${G}; } &`, 'F& G&'],
+    // So does one that closes a parenthesis in a group: the list it leaves behind begins in the group.
+    [`${F} && { (${G}) & }`, 'F G&'],
+    [`${F} || { { (${G}) & }; }`, 'F G&'],
+    [`${F} | { ( ${G} ) & }`, 'F G&'],
+    [`${F} && if true; then (${G}) & fi`, 'F G&'],
+    [`${F} && { (${G}) & } &`, 'F& G&'],
+    // Waited for, each is as it was.
+    [`${F} | cat`, 'F'],
+    [`${F} && echo done`, 'F'],
+    [`${F} & echo done`, 'F&'],
+    [`${F}; echo done &`, 'F'],
+    [`(${F})`, 'F!'],
+    [`{ ${F}; }`, 'F!'],
+    [`(${F}) && echo ok`, 'F'],
+    [`(${F} &)`, 'F&'],
+  ] as const) {
+    expect(`${command} => ${read(command)}`).toBe(`${command} => ${runs}`)
+  }
+})
+
+test('a shell told to leave at the first command that fails is not left by one that cannot fail: an assignment written out, `true`, `export` of a name, a failing taken in', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const maybe = (command: string): string => findFleetRuns(command).map(run => (run.isMaybe === true ? 'maybe' : 'sure')).join()
+
+  for (const plain of [`set -euo pipefail\nexport X=1\n${F}`, `set -e; X=1; Y="$X/a"; ${F}`, `set -e; true; :; ${F}`, `set -e; readonly R=/w; declare D=1; typeset T; ${F}`, `set -e; set -x; ${F}`, `set -e; test -f /nope || true; ${F}`, `set -e; rm /w/old || :\n${F}`]) {
+    expect(`${plain} ${maybe(plain)}`).toBe(`${plain} sure`)
+  }
+  for (const strict of [`set -e; cd /w; ${F}`, `set -e; X=$(cat /nope); ${F}`, `set -e; export X=\`cat /nope\`; ${F}`, `set -e; export X="$(cat /nope)"; ${F}`, `set -e; test -f /nope || echo no; ${F}`, `set -e; local X=1; ${F}`, `set -e; env true; ${F}`, `set -e; export -f f; ${F}`]) {
+    expect(`${strict} ${maybe(strict)}`).toBe(`${strict} maybe`)
+  }
+})
+
+test('a launch past what is not followed here may be passed by: it is told so, and no path of it is taken for sure', () => {
+  const F = 'fleet-run codex-build --cwd /w --spec /w/a.md --out /w/b.md'
+  const read = (command: string): string => findFleetRuns(command).map(run => `${run.isMaybe} ${run.spec} ${run.out}`).join()
+
+  // The launch is a default never taken, a part of a quote that goes on, or an argument of `:` in zsh, which ends the `case` where it ends.
+  for (const odd of [`X=1; : \${X:-$(${F})}`, `echo "\${U:-" ; ${F} ; "}"`, `: $(case a in b) : ;; esac) ${F}`, `X=$(case b in a) ${F}\n: ;; esac)`, `eval "$PRELUDE"; ${F}`, `case $1 in a) ${F} ;; esac`]) {
+    expect(`${odd} ${read(odd)}`).toBe(`${odd} true undefined undefined`)
+  }
+  expect(read(F)).toBe('undefined /w/a.md /w/b.md')
 })

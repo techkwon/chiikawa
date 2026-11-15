@@ -979,7 +979,7 @@ const disk = (
   on: On,
   clock: { now: () => number },
   given: Record<string, string>,
-  under: { looking?: () => Promise<void> | undefined; wrote?: (path: string) => void } = {},
+  under: { looking?: () => Promise<void> | undefined; wrote?: (path: string) => void; env?: Readonly<Record<string, string>>; envOf?: (name: string) => string | undefined; isThere?: (path: string) => boolean } = {},
 ): { files: Map<string, string>; written: string[]; put: (path: string, text: string, at?: number) => void } => {
   const files = new Map(Object.entries(given))
   const times = new Map(Object.keys(given).map(path => [path, clock.now()]))
@@ -989,7 +989,10 @@ const disk = (
     times.set(path, at)
   }
 
-  mock.env(on, { HOME: '/home/me' })
+  const { envOf } = under
+
+  if (envOf === undefined) mock.env(on, { HOME: '/home/me', ...under.env })
+  else on('env.get', ($, e) => ({ value: envOf(e.name) }))
   on('fs.read', ($, e) => {
     const text = files.get(e.path)
 
@@ -1004,6 +1007,7 @@ const disk = (
 
     return { value: undefined }
   })
+  on('fs.exists', ($, e) => ({ value: under.isThere?.(e.path) ?? files.has(e.path) }))
   on('fs.stat', async ($, e) => {
     await under.looking?.()
     if (!files.has(e.path)) throw new Error('ENOENT')
@@ -1637,7 +1641,8 @@ test('of two launches in one command, the one handed to an Orca terminal is wait
   shell(on)
   session(on)
   await $.session.start(START)
-  await $.tool.call({ tool: 'Bash', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md; orca terminal create --title b --command "fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md" --json` })
+  // The one waited for stands last: the command ends as it does.
+  await $.tool.call({ tool: 'Bash', command: `orca terminal create --title b --command "fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md" --json; fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
 
   const during = await roster($)
 
@@ -2268,6 +2273,96 @@ test('a shell command sent to the background is a task of a character, ended by 
   expect(ended).toContain('✗ 실패')
 })
 
+test("a command a subagent leaves running in the background is a task of its own past the subagent's turn: the notice that wakes the subagent ends it; one the engine stops at the subagent's final answer, or whose subagent has ended or is gone, is let go, neither done nor failed", KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const listed = [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'waiting' as 'waiting' | 'completed' }]
+  const ids: Record<string, string> = { 'python3 driver.py': 'bs1', 'npm run dev': 'bs2', 'npm run build': 'bs3', 'npm run watch': 'bs4' }
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: listed }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', ($, e) => {
+    const id = e.tool === 'Bash' ? ids[e.command] : undefined
+
+    // The engine stops a synchronous subagent's command at its final answer, and says so as it leaves it running.
+    return { result: { stdout: '', stderr: '', ...(id === undefined ? {} : { backgroundTaskId: id }), ...(id === 'bs2' ? { backgroundEndsWithFinalResponse: true } : {}) } } as never
+  })
+  /** The roster's line for a task, by its title. */
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').find(one => one.includes(title)) ?? ''
+
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: 'python3 driver.py', description: '퍼즈 돌리기', run_in_background: true, agentId: 'agent_1' })
+  await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'agent_1' })
+  // The subagent ends its turn to wait for the command: its own task ends, and the command's is still at work.
+  await $.turn.complete({ ...DONE, answer: '명령이 끝나기를 기다립니다.', agentId: 'agent_1', reason: 'answer' })
+  expect(await line('퍼즈 돌리기')).toContain('● 작업 중')
+  expect(await roster($)).not.toContain('· ls')
+  await clock.advance(60_000)
+  expect(await line('퍼즈 돌리기')).toContain('● 작업 중')
+
+  // The command's notice wakes the subagent: its next turn begins with it.
+  await $.turn.start({ turnId: 'turn_2', agentId: 'agent_1', text: '<task-notification>\n<task-id>bs1</task-id>\n<status>completed</status>\n<summary>Background command "퍼즈 돌리기" completed (exit code 0)</summary>\n</task-notification>' })
+  expect(await line('퍼즈 돌리기')).toContain('✓ 끝')
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: '서버 띄우기', run_in_background: true, agentId: 'agent_1' })
+  await $.tool.call({ tool: 'Bash', command: 'npm run build', description: '오래 도는 빌드', run_in_background: true, agentId: 'agent_1' })
+  expect(await line('서버 띄우기')).toContain('● 작업 중')
+  await $.turn.complete({ ...DONE, turnId: 'turn_2', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  // It may have ended well before the engine stopped it: it is let go, as neither done nor failed.
+  expect(await roster($)).toContain('서버 띄우기 · 끝을 알 수 없어 내려놓음')
+  expect((await roster($)).split('\n').filter(one => one.includes('서버 띄우기')).join('\n')).not.toMatch(/✓ 끝|✗ 실패|● 작업 중/)
+  expect(await line('오래 도는 빌드')).toContain('● 작업 중')
+
+  // No notice for the last command reaches any hook, and neither does one for a command of a subagent the engine does not list.
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: '남의 감시', run_in_background: true, agentId: 'agent_gone' })
+  const [row] = listed
+
+  if (row !== undefined) row.status = 'completed'
+  // A subagent that answered may still be woken by its command's notice: the command is waited for a little longer.
+  await clock.advance(2000)
+  expect(await line('오래 도는 빌드')).toContain('● 작업 중')
+  await clock.advance(40_000)
+  const gone = await roster($)
+
+  // How either ended was never seen: each is let go, and is told as neither done nor failed.
+  for (const title of ['오래 도는 빌드', '남의 감시']) {
+    expect(gone).toContain(`${title} · 끝을 알 수 없어 내려놓음`)
+    expect(gone.split('\n').filter(one => one.includes(title)).join('\n')).not.toMatch(/✓ 끝|✗ 실패|● 작업 중/)
+  }
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a subagent's command left in the background while the mode is turned off mid-call is no task", KO, async ($, on) => {
+  const box = { isOff: false }
+
+  mock.clock(on, { now: 5000 })
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  // What the mode reads of itself once the person has turned it off.
+  on('state.get', { plugin: 'chiikawa', key: 'isOn' }, async ($, e, next) => (box.isOff ? { value: { value: false, version: 1 } } : next(e)))
+  on('tool.call', ($, e) => {
+    // The person turns the mode off while this command is being started.
+    if (e.tool === 'Bash' && e.command === 'npm run slow') box.isOff = true
+
+    return { result: { stdout: '', stderr: '', ...(e.tool === 'Bash' ? { backgroundTaskId: `bg:${e.command}` } : {}) } } as never
+  })
+
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: 'npm run quick', description: '켜진 채 시작', run_in_background: true, agentId: 'agent_1' })
+  await $.tool.call({ tool: 'Bash', command: 'npm run slow', description: '끄는 중 시작', run_in_background: true, agentId: 'agent_1' })
+  box.isOff = false
+  const after = await roster($)
+
+  expect(after).toContain('켜진 채 시작')
+  expect(after).not.toContain('끄는 중 시작')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
 test('a background command whose description says exit code 0 but ended with exit code 1 is a failure', KO, async ($, on) => {
   mock.clock(on, { now: 5000 })
   on('ui.toast', () => ({ value: undefined }))
@@ -2327,6 +2422,59 @@ test('a background command done leaves no mark by its friend in the desktop band
   expect(chip).toBeDefined()
   expect(marks.length).toBe(0)
   await band.unmount()
+})
+
+test("a notice quoted in the text a subagent's turn begins with ends only that subagent's own command, not the main loop's nor another's", KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  const ids: Record<string, string> = { 'npm run dev': 'bg1', 'npm run build': 'bs1', 'npm run watch': 'bs2', 'npm run lint': 'bs3' }
+  const notice = (id: string): string => `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n<summary>Background command completed (exit code 0)</summary>\n</task-notification>`
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').find(one => one.includes(title)) ?? ''
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && ids[e.command] !== undefined ? { backgroundTaskId: ids[e.command] } : {}) } }) as never)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: '개발 서버', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'npm run build', description: '오래 도는 빌드', run_in_background: true, agentId: 'agent_1' })
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: '남의 감시', run_in_background: true, agentId: 'agent_2' })
+  // A prompt that quotes notices of the main loop's command and of another subagent's tells nothing of them.
+  await $.turn.start({ turnId: 'turn_2', agentId: 'agent_1', text: `이 알림을 참고하세요.\n${notice('bg1')}\n${notice('bs2')}` })
+  expect(await line('개발 서버')).toContain('● 작업 중')
+  expect(await line('남의 감시')).toContain('● 작업 중')
+  expect(await line('오래 도는 빌드')).toContain('● 작업 중')
+  // A message that woke it, quoting the notice of its own command, is no notice either: the command is still at work.
+  await $.turn.start({ turnId: 'turn_3', agentId: 'agent_1', text: `이런 알림이 오면 알려 주세요:\n${notice('bs1')}` })
+  expect(await line('오래 도는 빌드')).toContain('● 작업 중')
+  await $.tool.call({ tool: 'Bash', command: 'npm run lint', description: '린트', run_in_background: true, agentId: 'agent_1' })
+  // The engine's own notice, under its heading, ends its own; a copy of another quoted after it tells of nothing.
+  await $.turn.start({ turnId: 'turn_4', agentId: 'agent_1', text: `[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message from the user.\n\n${notice('bs1')}\n\n참고로 예전 알림: ${notice('bs3')}` })
+  expect(await line('오래 도는 빌드')).toContain('✓ 끝')
+  expect(await line('린트')).toContain('● 작업 중')
+  expect(await line('개발 서버')).toContain('● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a background command a subagent stops while the mode is off has ended when the mode is on again', KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: 'bs1' } : {}) } }) as never)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: '개발 서버', run_in_background: true, agentId: 'agent_1' })
+  expect(await roster($)).toMatch(/개발 서버[^\n]*● 작업 중|● 작업 중[^\n]*개발 서버/)
+  await $.command.run({ command: 'chiikawa', args: 'off', ...RUN })
+  await $.tool.call({ tool: 'TaskStop', task_id: 'bs1', agentId: 'agent_1' } as never)
+  await $.command.run({ command: 'chiikawa', args: 'on', ...RUN })
+  const after = (await roster($)).split('\n').filter(one => one.includes('개발 서버')).join('\n')
+
+  expect(after).not.toContain('● 작업 중')
+  expect(after).toMatch(/✗|중단/)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
 test('a background command the main loop stops ends as stopped, and one whose notice never comes is let go after an hour', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
@@ -2546,6 +2694,782 @@ test('a word a script handed on fills with what is not known here does not turn 
 
   expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
   expect(usage).toContain('🐰 우사기')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch the command may pass by is done only where it leaves its result: with none once the command ended well, it is let go, neither done nor failed nor taken off unseen', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기' })
+
+  // The shell runs the launch after `cd`, which writes its result as it ends; the one under `if false` it never runs.
+  on('tool.call', ($, e) => {
+    if (e.tool === 'Bash' && e.command.startsWith('cd /w && fleet-run codex-scout')) put(META, PASSED)
+
+    return { result: { stdout: '', stderr: '' } }
+  })
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `if false; then fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md; fi` })
+  expect(await roster($)).toContain('우사기의 find · 끝을 알 수 없어 내려놓음')
+  expect(await roster($)).not.toMatch(/우사기 \(탐색\) (?:✓ 끝|● 작업 중|✗ 실패)/)
+  // A failure the command took in looks the same: the launch ran, wrote nothing, and the command ended well.
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_c', command: `cd /w && fleet-run codex-build --cwd /w --spec ${SPEC} --out /w/a/build.out.md || true` })
+  expect(await roster($)).toContain('치이카와의 find · 끝을 알 수 없어 내려놓음')
+  expect(await roster($)).not.toMatch(/치이카와 \(구현\) (?:✓ 끝|● 작업 중|✗ 실패)/)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `cd /w && fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch the command may have passed by, in a command that answered an error and left no result, is let go: neither taken off unseen nor told as done or failed', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  // The command ends in an error: `cd` failed and the launch was passed by, or the launch ran and failed before it wrote anything.
+  on('tool.call', () => ({ isError: true as const, result: 'exit 1', text: 'exit 1' }))
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `cd /w && fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
+  const after = await roster($)
+
+  expect(after).toContain('우사기의 find · 끝을 알 수 없어 내려놓음')
+  expect(after).not.toMatch(/우사기 \(탐색\) (?:✓ 끝|● 작업 중|✗ 실패)/)
+  // The same launch standing alone surely ran: its error is a failure.
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✗ 실패')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch its command went on after, whose result is there and cannot be read when the command ends, is not let go: it is read at the next beat', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const box = { isDown: false }
+  const { put } = disk(
+    on,
+    clock,
+    { [SPEC]: '# 찾기' },
+    {
+      looking: () => {
+        if (box.isDown) throw new Error('EIO')
+
+        return undefined
+      },
+    },
+  )
+
+  // The worker writes its result while the command runs; when the command ends, no file can be looked at.
+  on('tool.call', () => {
+    put(META, PASSED)
+    box.isDown = true
+
+    return { result: { stdout: 'done', stderr: '' } } as never
+  })
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md; echo done` })
+  box.isDown = false
+  const held = await roster($)
+
+  expect(held).toContain('🐰 우사기 (탐색) ● 작업 중')
+  expect(held).not.toContain('우사기의 find · 끝을 알 수 없어 내려놓음')
+  await clock.advance(4000)
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a command nested deeper than can be read is run as it is written, once, and watched as a command like any other when left in the background', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const box = { runs: 0, command: '' }
+  const deep = `echo ${'$('.repeat(8000)}true${')'.repeat(8000)}; fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md`
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  on('tool.call', ($, e) => {
+    box.runs += 1
+    box.command = e.tool === 'Bash' ? e.command : ''
+
+    return { result: { stdout: 'ran', stderr: '', backgroundTaskId: 'bx1' } } as never
+  })
+  session(on)
+  await $.session.start(START)
+  const ran = await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: deep, description: '깊은 명령', run_in_background: true })
+
+  expect(box.runs).toBe(1)
+  expect(box.command).toBe(deep)
+  expect((ran.result as { stdout?: string }).stdout).toBe('ran')
+  const after = await roster($)
+
+  expect(after.split('\n').filter(one => one.includes('깊은 명령')).join('\n')).toContain('● 작업 중')
+  expect(after).not.toContain('find')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a command that has run is not run again where what the mode does after it fails: a clock that cannot be read then', KO, async ($, on) => {
+  const box = { runs: 0, isBroken: false }
+
+  // The clock is the test's own, so that it can fail: it stands still, and nothing waits on it.
+  on('clock.now', () => {
+    if (box.isBroken) throw new Error('no clock')
+
+    return { value: 5000 }
+  })
+  on('clock.every', () => ({ value: undefined }))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  disk(on, { now: () => 5000 } as never, { [SPEC]: '# 찾기' })
+  on('tool.call', () => {
+    box.runs += 1
+    // From the moment the command has run, the clock cannot be read.
+    box.isBroken = true
+
+    return { result: { stdout: '', stderr: '' } }
+  })
+  session(on)
+  await $.session.start(START)
+  // A launch that may have been passed by, one that surely ran, and a subagent's own call.
+  for (const call of [
+    { command: `cd /w && fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` },
+    { command: `fleet-run codex-build --cwd /w --spec ${SPEC} --out /w/a/build.out.md` },
+    { command: 'ls', agentId: 'agent_1' },
+  ]) {
+    box.runs = 0
+    box.isBroken = false
+    await $.tool.call({ tool: 'Bash', tool_use_id: `toolu_${call.command.length}`, ...call }).catch(() => undefined)
+    box.isBroken = false
+    expect(`${call.command.slice(0, 6)} ran ${box.runs}`).toBe(`${call.command.slice(0, 6)} ran 1`)
+  }
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch whose name is written over two lines, or with quotes in it, is a task as any other: its paths are read and its result ends it', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기' })
+
+  // The first leaves its result as it ends; the second leaves none yet.
+  on('tool.call', ($, e) => {
+    if (e.tool === 'Bash' && e.command.includes('codex-scout')) put(META, PASSED)
+
+    return { result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: 'bg1' } : {}) } } as never
+  })
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `fleet-\\\nrun codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `fle"et-r"un codex-build --cwd /w --spec ${SPEC} --out /w/a/build.out.md`, run_in_background: true })
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch that may not have run, with no result path read for it, is let go when its command ends: neither done nor failed by how the command ended', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  session(on)
+  await $.session.start(START)
+  // The last command's success says nothing of the launch, and no path of it is taken as read.
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md; echo "$(echo esac)"` })
+  const after = await roster($)
+
+  expect(after).toContain('끝을 알 수 없어 내려놓음')
+  expect(after).not.toMatch(/우사기 \(탐색\) (?:✓ 끝|● 작업 중|✗ 실패)/)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a command that only names fleet-run, with no launch in it, is a command like any other: left in the background it is watched, the main loop\'s and a subagent\'s', KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  const ids = ['bg1', 'bs1']
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').find(one => one.includes(title)) ?? ''
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift() } : {}) } }) as never)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: "rg 'fleet-'run .; sleep 30", description: '이름 찾기', run_in_background: true })
+  expect(await line('이름 찾기')).toContain('● 작업 중')
+  await $.tool.call({ tool: 'Bash', command: 'grep -r fleet-run docs; sleep 30', description: '문서 찾기', run_in_background: true, agentId: 'agent_1' })
+  expect(await line('문서 찾기')).toContain('● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch ends as its command did only where the command exits as it does: after any other, with no result, how it ended is not known', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const scout = `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md`
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  // Each command ends well, whatever the launch in it did: no result is written.
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  session(on)
+  await $.session.start(START)
+  for (const [index, command] of [`${scout} || true`, `${scout} 2>&1 | tail -5`, `${scout}; echo done`, `if ${scout}; then echo ok; fi`].entries()) {
+    await $.tool.call({ tool: 'Bash', tool_use_id: `toolu_${index}`, command })
+    const after = await roster($)
+
+    expect(`${command} ${after.includes('우사기의 find · 끝을 알 수 없어 내려놓음')}`).toBe(`${command} true`)
+    expect(`${command} ${/우사기 \(탐색\) (?:✓ 끝|● 작업 중|✗ 실패)/.test(after)}`).toBe(`${command} false`)
+    await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+  }
+  // Standing last and alone, it ends as the command did.
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_z', command: `cd /w; ${scout}` })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch that may have been passed by was turned away by nothing: one fleet-run would refuse is let go, not told as failed', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  on('tool.call', ($, e) => (e.tool === 'Bash' && e.command.startsWith('test') ? { isError: true as const, result: 'exit 1', text: 'exit 1' } : { result: { stdout: '', stderr: '' } }))
+  session(on)
+  await $.session.start(START)
+  for (const [index, command] of [`test -f /nope && fleet-run codex-scout --spec ${SPEC}`, `if test -f /nope; then fleet-run codex-scout --spec ${SPEC}; fi`].entries()) {
+    await $.tool.call({ tool: 'Bash', tool_use_id: `toolu_${index}`, command })
+    const after = await roster($)
+
+    expect(`${command} ${after.includes('끝을 알 수 없어 내려놓음')}`).toBe(`${command} true`)
+    expect(`${command} ${/✗ 실패|돌려보/.test(after)}`).toBe(`${command} false`)
+    await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+  }
+  // One that surely ran is told as turned away.
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_z', command: `fleet-run codex-scout --spec ${SPEC}` })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✗ 실패')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch after a command, in a shell told to leave at the first that fails, is let go when the command fails with no result: it may never have run', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  on('tool.call', () => ({ isError: true as const, result: 'exit 1', text: 'exit 1' }))
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `set -e; test -f /nope; fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
+  const after = await roster($)
+
+  expect(after).toContain('우사기의 find · 끝을 알 수 없어 내려놓음')
+  expect(after).not.toMatch(/우사기 \(탐색\) (?:✓ 끝|● 작업 중|✗ 실패)/)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch after a redirection that cannot be opened, in a shell told to leave at the first command that fails, is let go when the command fails with no result: its worker never started, and is not told as failed', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  // The shell left at the redirection: fleet-run never ran, and the call answers an error.
+  on('tool.call', () => ({ isError: true as const, result: 'no such file or directory', text: 'no such file or directory' }))
+  session(on)
+  await $.session.start(START)
+  for (const [call, before] of [': >/nonexist/log', 'true >/nonexist/log', '>/nonexist/log', 'x=1 >/nonexist/log'].entries()) {
+    await $.tool.call({ tool: 'Bash', tool_use_id: `toolu_${call}`, command: `set -e; ${before}; fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
+    const after = await roster($)
+
+    expect(`${before} ${after.includes('우사기의 find · 끝을 알 수 없어 내려놓음') ? 'let go' : 'kept'}`).toBe(`${before} let go`)
+    expect(`${before} ${/우사기 \(탐색\) (?:✓ 끝|● 작업 중|✗ 실패)/.test(after) ? 'told' : 'not told'}`).toBe(`${before} not told`)
+    await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+  }
+})
+
+test("a launch in a command left in the background ends when the command's notice comes: by its result where one was written, and let go where none was", KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기', [OTHER]: '# 다른 일' })
+  const ids = ['bf1', 'bf2', 'bf3']
+  const notice = (id: string, status: string, code: number): string => `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>Background command ${status} (exit code ${code})</summary>\n</task-notification>`
+
+  on('tool.call', () => ({ result: { stdout: '', stderr: '', backgroundTaskId: ids.shift() } }) as never)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  session(on)
+  await $.session.start(START)
+  // The first fails before it writes anything; the second, moved to the background by the engine, writes its result; the third is handed on by `nohup`.
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md`, run_in_background: true })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md` })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_c', command: `nohup fleet-run codex-review --cwd /w --spec ${SPEC} --out /w/a/review.out.md >/dev/null 2>&1 &`, run_in_background: true })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ● 작업 중')
+  await $.prompt.submit({ text: notice('bf1', 'failed', 2), wait: false, origin: { kind: 'task-notification' } })
+  const failed = await roster($)
+
+  expect(failed).toContain('우사기의 find · 끝을 알 수 없어 내려놓음')
+  expect(failed).not.toMatch(/우사기 \(탐색\) (?:✓ 끝|● 작업 중|✗ 실패)/)
+  expect(failed).toContain('🐹 치이카와 (구현) ● 작업 중')
+  put('/w/a/other.out.md.meta.json', PASSED)
+  await $.prompt.submit({ text: notice('bf2', 'completed', 0), wait: false, origin: { kind: 'task-notification' } })
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ✓ 끝')
+  // The shell that handed the third on has ended: the worker has not.
+  await $.prompt.submit({ text: notice('bf3', 'completed', 0), wait: false, origin: { kind: 'task-notification' } })
+  expect(await roster($)).toMatch(/● 작업 중[^\n]*codex-review/)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a launch in `<(…)` or `>(…)` is not waited for by its command: the notice of a background command's end leaves it at work, and its result ends it later", KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기', [OTHER]: '# 다른 일' })
+  const ids = ['bp1']
+  const notice = (id: string): string => `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n<summary>Background command completed (exit code 0)</summary>\n</task-notification>`
+
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift() } : {}) } }) as never)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `sleep 1; true <(fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md >/dev/null 2>&1)`, run_in_background: true })
+  // In a command that ends at once, with nothing after it, it has not ended either.
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `echo x > >(fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md)` })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ● 작업 중')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ● 작업 중')
+  await $.prompt.submit({ text: notice('bp1'), wait: false, origin: { kind: 'task-notification' } })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ● 작업 중')
+  expect(await roster($)).not.toContain('끝을 알 수 없어 내려놓음')
+  put(META, PASSED)
+  await clock.advance(4000)
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch behind a long run of line ends, and a turn that begins with a notice left open before a long run of blanks, are read in time that grows with their length', { ...KO, timeoutMs: 120_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+
+  disk(on, clock, { [SPEC]: '# 찾기' })
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('agent.list', () => ({ value: [] }))
+  session(on)
+  await $.session.start(START)
+  /** The quicker of two tries, so that a busy machine is not taken for a slow reading. */
+  const took = async (act: (round: number) => Promise<unknown>): Promise<string> => {
+    const times: number[] = []
+
+    for (const round of [0, 1]) {
+      const from = performance.now()
+
+      await act(round)
+      times.push(performance.now() - from)
+    }
+
+    return Math.min(...times) < 300 ? 'in time' : 'too slow'
+  }
+  const notice = '<task-notification>\n<task-id>none</task-id>\n<status>completed</status>\n</task-notification>\n'
+
+  expect(await took(round => $.tool.call({ tool: 'Bash', tool_use_id: `toolu_${round}`, command: `${'\n'.repeat(20_000)}fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find${round}.out.md` }))).toBe('in time')
+  expect(await roster($)).toContain('우사기')
+  // A notice left open behind blanks, and one left open behind many that are whole.
+  expect(await took(round => $.turn.start({ turnId: `turn_a${round}`, agentId: 'agent_1', text: `<task-notification>${' '.repeat(100_000)}` }))).toBe('in time')
+  expect(await took(round => $.turn.start({ turnId: `turn_b${round}`, agentId: 'agent_1', text: `${notice.repeat(3000)}<task-notification>` }))).toBe('in time')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('where the Bash tool runs zsh, a launch before the last pipeline of `a && b &` has ended when the command has: with no result it is let go, and is not left at work', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기', [OTHER]: '# 다른 일', '/bin/zsh': '' }, { env: { SHELL: '/bin/zsh' } })
+
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md && echo done &` })
+  expect(await roster($)).not.toContain('🐰 우사기 (탐색) ● 작업 중')
+  expect(await roster($)).toContain('끝을 알 수 없어 내려놓음')
+  // The last pipeline is left running behind all the same, and its result ends it.
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `true && fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md &` })
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ● 작업 중')
+  put('/w/a/other.out.md.meta.json', PASSED)
+  await clock.advance(4000)
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ✓ 끝')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('the shell the Bash tool runs is taken as zsh only where the first of the paths the engine goes by that is there names it: one that is not there is passed by, and a path that cannot be looked for tells nothing', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const box: { there: readonly string[]; isBroken: boolean } = { there: [], isBroken: false }
+  const env: Record<string, string> = { HOME: '/home/me' }
+
+  disk(on, clock, { [SPEC]: '# 찾기' }, {
+    envOf: name => env[name],
+    isThere: path => {
+      if (box.isBroken) throw new Error('EIO')
+
+      return box.there.includes(path)
+    },
+  })
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  session(on)
+  /** How a launch before the last pipeline of `a && b &` is told once its command has ended with no result: let go where the shell is zsh, at work where it is not known. */
+  const read = async (round: number): Promise<string> => {
+    await $.session.start(START)
+    await $.tool.call({ tool: 'Bash', tool_use_id: `toolu_${round}`, command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find${round}.out.md && echo done &` })
+    const page = await roster($)
+
+    await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+
+    return page.includes('🐰 우사기 (탐색) ● 작업 중') ? 'at work' : 'let go'
+  }
+
+  for (const [round, [shell, own, there, isBroken, told]] of (
+    [
+      ['/bin/zsh', undefined, ['/bin/zsh'], false, 'let go'],
+      // Not there: the engine goes on to places of its own.
+      ['/opt/gone/zsh', undefined, [], false, 'at work'],
+      // The first is passed by where it is not there, and decides where it is.
+      ['/bin/zsh', '/opt/gone/bash', ['/bin/zsh'], false, 'let go'],
+      ['/bin/zsh', '/bin/bash', ['/bin/zsh', '/bin/bash'], false, 'at work'],
+      ['/bin/bash', '/bin/zsh', ['/bin/zsh', '/bin/bash'], false, 'let go'],
+      ['/bin/zsh', undefined, ['/bin/zsh'], true, 'at work'],
+    ] as const
+  ).entries()) {
+    for (const name of ['SHELL', 'CLAUDE_CODE_SHELL']) delete env[name]
+    env.SHELL = shell
+    if (own !== undefined) env.CLAUDE_CODE_SHELL = own
+    box.there = there
+    box.isBroken = isBroken
+    expect(`${round} ${await read(round)}`).toBe(`${round} ${told}`)
+  }
+})
+
+test("a launch whose result is there and cannot be read when its command's notice comes is not let go: it is read at a later beat, and one with no result is let go as before", KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const box = { isDown: false }
+  const { put } = disk(
+    on,
+    clock,
+    { [SPEC]: '# 찾기', [OTHER]: '# 다른 일' },
+    {
+      looking: () => {
+        if (box.isDown) throw new Error('EIO')
+
+        return undefined
+      },
+    },
+  )
+  const ids = ['bu1', 'bu2']
+  const notice = (id: string): string => `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n<summary>Background command completed (exit code 0)</summary>\n</task-notification>`
+
+  on('tool.call', () => ({ result: { stdout: '', stderr: '', backgroundTaskId: ids.shift() } }) as never)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md`, run_in_background: true })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md`, run_in_background: true })
+  // The first has written its result; the second wrote none. No file can be looked at while the notices come.
+  put(META, PASSED)
+  box.isDown = true
+  await $.prompt.submit({ text: `${notice('bu1')}\n${notice('bu2')}`, wait: false, origin: { kind: 'task-notification' } })
+  box.isDown = false
+  const held = await roster($)
+
+  expect(held).toContain('🐰 우사기 (탐색) ● 작업 중')
+  expect(held).not.toContain('우사기의 find · 끝을 알 수 없어 내려놓음')
+  expect(held).not.toContain('🐹 치이카와 (구현) ● 작업 중')
+  await clock.advance(4000)
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a launch in a parenthesis or a group closed by an `&` is still at work when its command ends at once: its result ends it later", KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기', [OTHER]: '# 다른 일' })
+
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `(fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md) &` })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `{ fleet-run codex-build --cwd /w --spec ${OTHER} --out /w/a/other.out.md; } &` })
+  const during = await roster($)
+
+  expect(during).toContain('🐰 우사기 (탐색) ● 작업 중')
+  expect(during).toContain('🐹 치이카와 (구현) ● 작업 중')
+  put(META, PASSED)
+  await clock.advance(4000)
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ✓ 끝')
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a launch in a subagent's background command ends where the command does with no notice: at the subagent's final answer where the engine stops it then, or when the subagent stops it; one the engine leaves running is waited for by its result past the subagent's end", KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const listed = [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' }]
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기', [OTHER]: '# 다른 일', '/w/a/third.spec.md': '# 셋째', '/w/a/fourth.spec.md': '# 넷째' })
+  const ids = ['bf1', 'bf2', 'bf3', 'bf4']
+  const launch = (profile: string, name: string): string => `fleet-run ${profile} --cwd /w --spec /w/a/${name}.spec.md --out /w/a/${name}.out.md`
+  const line = async (engine: string): Promise<string> => (await roster($)).split('\n').filter(one => one.includes(engine)).join('\n')
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: listed }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', ($, e) => {
+    const id = e.tool === 'Bash' ? ids.shift() : undefined
+
+    // The first two are stopped by the engine at the subagent's final answer; the others outlast it.
+    return { result: { stdout: '', stderr: '', ...(id === undefined ? {} : { backgroundTaskId: id }), ...(id === 'bf1' || id === 'bf2' ? { backgroundEndsWithFinalResponse: true } : {}) } } as never
+  })
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: launch('codex-scout', 'find'), run_in_background: true, agentId: 'agent_1' })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: launch('codex-build', 'other'), run_in_background: true, agentId: 'agent_1' })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_c', command: launch('codex-review', 'third'), run_in_background: true, agentId: 'agent_1' })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_d', command: launch('grok-research', 'fourth'), run_in_background: true, agentId: 'agent_1' })
+  for (const engine of ['codex-scout', 'codex-build', 'codex-review', 'grok-research']) expect(`${engine} ${(await line(engine)).includes('● 작업 중')}`).toBe(`${engine} true`)
+
+  // The subagent stops the third: it wrote nothing.
+  await $.tool.call({ tool: 'TaskStop', task_id: 'bf3', agentId: 'agent_1' } as never)
+  expect(await line('codex-review')).not.toMatch(/● 작업 중|✓ 끝|✗ 실패/)
+  // At its final answer the first has written its result and the second has not.
+  put(META, PASSED)
+  await $.turn.complete({ ...DONE, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  expect(await line('codex-scout')).toContain('✓ 끝')
+  expect(await line('codex-build')).not.toMatch(/● 작업 중|✓ 끝|✗ 실패/)
+  expect(await line('grok-research')).toContain('● 작업 중')
+  // The subagent is done, and the engine leaves the fourth running: it is still at work, and its result ends it when it comes.
+  const [row] = listed
+
+  if (row !== undefined) row.status = 'completed'
+  await clock.advance(40_000)
+  expect(await line('grok-research')).toContain('● 작업 중')
+  put('/w/a/fourth.out.md.meta.json', PASSED)
+  await clock.advance(4000)
+  expect(await line('grok-research')).toContain('✓ 끝')
+  expect((await roster($)).match(/끝을 알 수 없어 내려놓음/g)?.length ?? 0).toBeGreaterThanOrEqual(1)
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a subagent's turn told as ended a second time ends nothing its subagent began since: a command tied to its next answer is still at work", KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  const ids = ['bs1', 'bs2']
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').filter(one => one.includes(title)).join('\n')
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift(), backgroundEndsWithFinalResponse: true } : {}) } }) as never)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: '서버 띄우기', run_in_background: true, agentId: 'agent_1' })
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  expect(await line('서버 띄우기')).not.toContain('● 작업 중')
+  // Woken again, it leaves another command running, tied to the answer of the turn it is in now.
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: '감시 돌리기', run_in_background: true, agentId: 'agent_1' })
+  expect(await line('감시 돌리기')).toContain('● 작업 중')
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  expect(await line('감시 돌리기')).toContain('● 작업 중')
+  // The answer of its own turn ends it.
+  await $.turn.complete({ ...DONE, turnId: 'turn_2', answer: '다 끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  expect(await line('감시 돌리기')).not.toContain('● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a subagent's turn whose end could not be taken, told again, is taken then and ends nothing its subagent began since", KO, async ($, on) => {
+  const box = { fails: 0, calls: 0 }
+  const ids = ['bt1', 'bt2']
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').filter(one => one.includes(title)).join('\n')
+
+  // The clock is the test's own, so that it can fail for a while: it stands still, and nothing waits on it.
+  on('clock.now', () => {
+    box.calls += 1
+    if (box.fails > 0) {
+      box.fails -= 1
+      throw new Error('no clock')
+    }
+
+    return { value: 5000 }
+  })
+  on('clock.every', () => ({ value: undefined }))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift(), backgroundEndsWithFinalResponse: true } : {}) } }) as never)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: '서버 띄우기', run_in_background: true, agentId: 'agent_1' })
+  // The turn's end is told while the clock cannot be read, twice: where the turn is taken, and where its task would be ended.
+  box.fails = 2
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' }).catch(() => undefined)
+  box.fails = 0
+  expect(await roster($)).toMatch(/● 작업 중[^\n]*로그인 폼 구현|로그인 폼 구현[^\n]*● 작업 중/)
+  // Woken again, it leaves another command running, tied to the answer of the turn it is in now.
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: '감시 돌리기', run_in_background: true, agentId: 'agent_1' })
+  expect(await line('감시 돌리기')).toContain('● 작업 중')
+  // Told again, the turn is taken now: the subagent's task ends, and the command of its next turn is still at work.
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  expect(await roster($)).not.toMatch(/● 작업 중[^\n]*로그인 폼 구현|로그인 폼 구현[^\n]*● 작업 중/)
+  expect(await line('감시 돌리기')).toContain('● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a tied command whose letting go failed at its subagent's answer is let go when the turn is told again, or at the next beat, and nothing the subagent began since is", KO, async ($, on) => {
+  const box = { fails: 0, at: 5000 }
+  const ids = ['bq1', 'bq2', 'bq3', 'bq4']
+  /** The periods asked for and held: let go, each runs its beat once and asks for the next. */
+  const held: (() => void)[] = []
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').filter(one => one.includes(title)).join('\n')
+
+  // The clock is the test's own, so that it can fail for a while.
+  on('clock.now', () => {
+    if (box.fails > 0) {
+      box.fails -= 1
+      throw new Error('no clock')
+    }
+
+    return { value: box.at }
+  })
+  on('clock.every', () => new Promise<{ value: undefined }>(resolve => held.push(() => resolve({ value: undefined }))))
+  on('clock.after', () => ({ value: undefined }))
+  on('clock.sleep', () => ({ value: undefined }))
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift(), backgroundEndsWithFinalResponse: true } : {}) } }) as never)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  for (const [turn, first, next] of [
+    ['turn_1', '서버 띄우기', '감시 돌리기'],
+    ['turn_3', '빌드 돌리기', '테스트 돌리기'],
+  ] as const) {
+    await $.tool.call({ tool: 'Bash', command: `npm run ${turn}`, description: first, run_in_background: true, agentId: 'agent_1' })
+    // The answer comes while the clock cannot be read: the turn is not taken, and its command cannot be let go.
+    box.fails = 1000
+    await $.turn.complete({ ...DONE, turnId: turn, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' }).catch(() => undefined)
+    box.fails = 0
+    expect(await line(first)).toContain('● 작업 중')
+    // Woken again, it leaves another command running, tied to the answer of the turn it is in now.
+    await $.tool.call({ tool: 'Bash', command: `npm run ${turn} more`, description: next, run_in_background: true, agentId: 'agent_1' })
+    // The first by the turn told again, the second by a beat.
+    if (turn === 'turn_1') await $.turn.complete({ ...DONE, turnId: turn, answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+    else {
+      for (const go of held.splice(0)) go()
+      for (let wait = 0; wait < 5; wait += 1) await breathe()
+    }
+    expect(`${first} ${(await line(first)).includes('● 작업 중') ? 'at work' : 'let go'}`).toBe(`${first} let go`)
+    expect(await line(next)).toContain('● 작업 중')
+  }
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a tied command whose subagent answered while the list of tasks could not be read is let go when the turn is told again, and nothing the subagent began since is", KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  const box = { isDown: false }
+  const ids = ['br1', 'br2']
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').filter(one => one.includes(title)).join('\n')
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift(), backgroundEndsWithFinalResponse: true } : {}) } }) as never)
+  on('state.get', { plugin: 'chiikawa', key: 'tasks' }, ($, e, next) => (box.isDown ? { deny: 'no state' } : next(e)))
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: '서버 띄우기', run_in_background: true, agentId: 'agent_1' })
+  expect(await line('서버 띄우기')).toContain('● 작업 중')
+  // While the answer is told, no reading of the tasks answers: which commands are tied to it cannot be looked up.
+  box.isDown = true
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' }).catch(() => undefined)
+  box.isDown = false
+  expect(await line('서버 띄우기')).toContain('● 작업 중')
+  // Woken again, it leaves another command running, tied to the answer of the turn it is in now.
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: '감시 돌리기', run_in_background: true, agentId: 'agent_1' })
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+  expect(`서버 띄우기 ${(await line('서버 띄우기')).includes('● 작업 중') ? 'at work' : 'let go'}`).toBe('서버 띄우기 let go')
+  expect(await line('감시 돌리기')).toContain('● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a notice handed to a subagent in the middle of its turn ends the command it tells of, as done or failed by what it says: the subagent's answer then lets go only a command no notice came for", KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  const ids = ['bw1', 'bw2', 'bw3', 'bw4']
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').filter(one => one.includes(title)).join('\n')
+  const notice = (id: string, status: string, code: number): string => `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>Background command ${status} (exit code ${code})</summary>\n</task-notification>`
+  const HEAD = '[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message from the user.\n\n'
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('prompt.attachment', ($, e) => ({ text: e.text }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift(), backgroundEndsWithFinalResponse: true } : {}) } }) as never)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  for (const title of ['빌드 기다리기', '테스트 돌리기', '감시 돌리기']) await $.tool.call({ tool: 'Bash', command: `npm run ${title}`, description: title, run_in_background: true, agentId: 'agent_1' })
+  await $.tool.call({ tool: 'Bash', command: 'npm run 남의 일', description: '남의 일', run_in_background: true, agentId: 'agent_2' })
+  // The subagent works on in the foreground; two of its commands end meanwhile, and their notices come beside its next request.
+  await $.tool.call({ tool: 'Bash', command: 'sleep 20', agentId: 'agent_1' })
+  await $.prompt.attachment({ type: 'queued_command', text: `${HEAD}${notice('bw1', 'completed', 0)}`, origin: { kind: 'engine' }, agentId: 'agent_1' })
+  await $.prompt.attachment({ type: 'queued_command', text: `${HEAD}${notice('bw2', 'failed', 1)}`, origin: { kind: 'engine' }, agentId: 'agent_1' })
+  // A message that only quotes a notice, and a notice of a command that is another's, end nothing.
+  await $.prompt.attachment({ type: 'queued_command', text: `이런 알림이 오면 알려 주세요:\n${notice('bw3', 'completed', 0)}`, origin: { kind: 'engine' }, agentId: 'agent_1' })
+  await $.prompt.attachment({ type: 'queued_command', text: `${HEAD}${notice('bw4', 'completed', 0)}`, origin: { kind: 'engine' }, agentId: 'agent_1' })
+  expect(await line('빌드 기다리기')).toContain('✓ 끝')
+  expect(await line('테스트 돌리기')).toContain('✗ 실패')
+  expect(await line('감시 돌리기')).toContain('● 작업 중')
+  expect(await line('남의 일')).toContain('● 작업 중')
+  await $.turn.complete({ ...DONE, turnId: 'turn_1', answer: 'ok', agentId: 'agent_1', reason: 'answer' })
+  const after = await roster($)
+
+  expect(await line('빌드 기다리기')).toContain('✓ 끝')
+  expect(await line('테스트 돌리기')).toContain('✗ 실패')
+  expect(after).not.toContain('빌드 기다리기 · 끝을 알 수 없어 내려놓음')
+  expect(after).not.toContain('테스트 돌리기 · 끝을 알 수 없어 내려놓음')
+  expect(after).toContain('감시 돌리기 · 끝을 알 수 없어 내려놓음')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test("a tied command its subagent begins in its next turn, while the answer before it is still being taken, is not let go with that answer's", KO, async ($, on) => {
+  mock.clock(on, { now: 5000 })
+  const box = { isSlow: false }
+  const ids = ['bv1', 'bv2']
+  /** The readings of the tasks held back: let go, each answers. */
+  const held: (() => void)[] = []
+  const line = async (title: string): Promise<string> => (await roster($)).split('\n').filter(one => one.includes(title)).join('\n')
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: [{ id: 'agent_1', description: '로그인 폼 구현', type: 'general-purpose', status: 'running' as const }] }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift(), backgroundEndsWithFinalResponse: true } : {}) } }) as never)
+  on('state.get', { plugin: 'chiikawa', key: 'tasks' }, async ($, e, next) => {
+    if (box.isSlow) await new Promise<void>(resolve => held.push(resolve))
+
+    return next(e)
+  })
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: '서버 띄우기', run_in_background: true, agentId: 'agent_1' })
+  // The answer is told, and the reading it waits for is slow.
+  box.isSlow = true
+  const told = $.turn.complete({ ...DONE, turnId: 'turn_1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' })
+
+  for (let wait = 0; wait < 5; wait += 1) await breathe()
+  expect(held.length).toBeGreaterThan(0)
+  box.isSlow = false
+  // Woken meanwhile, the subagent leaves another command running, tied to the answer of the turn it is in now.
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: '감시 돌리기', run_in_background: true, agentId: 'agent_1' })
+  for (const go of held.splice(0)) go()
+  await told
+  expect(`서버 띄우기 ${(await line('서버 띄우기')).includes('● 작업 중') ? 'at work' : 'let go'}`).toBe('서버 띄우기 let go')
+  expect(await line('감시 돌리기')).toContain('● 작업 중')
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a launch in a command the engine itself moved to the background is still at work: it is neither ended nor taken off, and its result is looked for', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { put } = disk(on, clock, { [SPEC]: '# 찾기' })
+
+  // Neither command asked to run in the background: each ran past its timeout, and the engine left it running.
+  on('tool.call', () => ({ result: { stdout: '', stderr: '', backgroundTaskId: 'bt9', timedOutAfterMs: 300_000 } }) as never)
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `fleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
+  expect(await roster($)).toContain('🐰 우사기 (탐색) ● 작업 중')
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `cd /w && fleet-run codex-build --cwd /w --spec ${SPEC} --out /w/a/build.out.md` })
+  expect(await roster($)).toContain('🐹 치이카와 (구현) ● 작업 중')
+  // The first worker's result lands later: the beat reads its end off it.
+  put(META, PASSED)
+  await clock.advance(4000)
+  const after = await roster($)
+
+  expect(after).toContain('🐰 우사기 (탐색) ✓ 끝')
+  expect(after).toContain('🐹 치이카와 (구현) ● 작업 중')
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
