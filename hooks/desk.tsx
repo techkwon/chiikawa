@@ -232,6 +232,8 @@ const FriendCard = (kit: DeskKit, scene: Scene, card: Card, width: number, acts:
   const isPicked = scene.picked === card.id
   const isBusy = isOnWork(card)
   const title = card.isIdle ? '' : (card.title ?? card.work)
+  // The bobbing dot stands for the running mark, so the state is said once.
+  const status = card.isRunning ? card.status.replace(/^[●◐✓✗○]\s*/u, '') : card.status
 
   return (
     <Box key={`card-${card.id}`} flexDirection="column" borderStyle="round" borderColor={isBusy ? member.color : 'subtle'} borderDimColor={!isBusy} paddingX="md" paddingY="xs" gap="xs" minWidth={width} flexGrow={1}>
@@ -245,7 +247,7 @@ const FriendCard = (kit: DeskKit, scene: Scene, card: Card, width: number, acts:
             <Box gap="xs" alignItems="center">
               {card.isRunning && Dot(kit, card.id, lang, true)}
               <Text size={card.isIdle ? 'caption' : 'footnote'} color={card.tint} weight={card.isIdle ? 'regular' : 'semibold'} dimColor={card.isIdle} tabular>
-                {card.status}
+                {status}
               </Text>
             </Box>
           </Box>
@@ -288,16 +290,6 @@ const Heading = (kit: DeskKit, label: string, key: string): RenderElement => (
   <kit.Text key={key} size="footnote" weight="semibold" dimColor>
     {label}
   </kit.Text>
-)
-
-/** A label over a group of cards, with how many there are. */
-const Counted = (kit: DeskKit, label: string, count: number, key: string): RenderElement => (
-  <kit.Box key={key} gap="sm" alignItems="center">
-    {Heading(kit, label, `${key}-label`)}
-    <kit.Text size="caption" dimColor tabular>
-      {String(count)}
-    </kit.Text>
-  </kit.Box>
 )
 
 /** The sheet of the friend the person pressed: its state, what it is doing, the roles to give it, and the way to hand it the next prompt. */
@@ -518,7 +510,7 @@ export const drawDeskPane = (kit: DeskKit, scene: Scene, isOn: boolean, columns:
       {sheet !== undefined && SheetCard(kit, scene, sheet, acts)}
       {atWork.length > 0 && (
         <Box key="group-work" flexDirection="column" gap="xs">
-          {Counted(kit, words.workers, atWork.length, 'workers')}
+          {Heading(kit, words.workers, 'workers-label')}
           {Cards(kit, scene, atWork, columns, acts, 'cards-work')}
         </Box>
       )}
@@ -590,7 +582,7 @@ const Chip = (kit: DeskKit, scene: Scene, id: MemberId, onSeat: (id: MemberId) =
   const seat = seatOf(scene, onStage(scene), id)
   const member = MEMBERS[id]
   // One at work is a framed pill in its color; the others keep the same frame unseen, so a friend starting or ending work moves nothing in the row, its height above all.
-  const frame = { borderStyle: 'round', borderColor: seat.isBusy ? member.color : UNSEEN, paddingX: 'sm' as const }
+  const frame = { borderStyle: 'round', borderColor: seat.isBusy ? member.color : UNSEEN, backgroundColor: seat.isBusy ? `${member.color}38` : UNSEEN, paddingX: 'sm' as const }
   const tint: Color | undefined = seat.tint
   const card = cardOf(id, scene)
   // Only a small picture goes in the band: a large one leaves the whole band undrawn.

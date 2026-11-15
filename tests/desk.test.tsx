@@ -67,11 +67,13 @@ test('the desktop pane draws a card only for the friends at work, with no cell-g
     expect(await pane.find({ key: `card-${id}` })).toBeUndefined()
   }
   expect(await pane.find({ type: 'Text', text: /^ 시사 $/ })).toMatchObject({ props: { backgroundColor: '#f08a24', color: '#000000' } })
+  // The dot stands for the running mark: the state is said once, and the heading counts nothing the title has not.
+  expect(await pane.find({ type: 'Text', text: /^● 작업 중/ })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /^작업 중 / })).toBeDefined()
   // The ones at work are told apart: their heading, their task, and a dot of their color.
   expect(await pane.find({ type: 'Text', text: /^일하는 친구들$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^쉬는 친구들$/ })).toBeUndefined()
   expect(await pane.find({ type: 'Text', text: /^로그인 폼 구현$/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /^● 작업 중 / })).toBeDefined()
   expect((await pane.findAll({ type: 'Svg' })).length).toBeGreaterThanOrEqual(2)
   // The conversation keeps the sound of the one who cannot talk, and 하치와레's reading of it.
   expect(await pane.find({ type: 'Text', text: /^\(손으로 O를 그린다\)$/ })).toMatchObject({ props: { italic: false } })
@@ -142,8 +144,8 @@ test('the desktop band has a chip for the main three and each friend at work to 
   // A guest resting is hidden.
   expect(await band.find({ key: 'seat-rakko' })).toBeUndefined()
   // The ones at work are framed in their color with a dot; the others keep the same frame unseen, so the row's height never changes.
-  expect(await band.find({ key: 'chip-shisa' })).toMatchObject({ props: { borderStyle: 'round', borderColor: '#f08a24', paddingX: 'sm' } })
-  expect(await band.find({ key: 'chip-usagi' })).toMatchObject({ props: { borderStyle: 'round', borderColor: '#00000000', paddingX: 'sm' } })
+  expect(await band.find({ key: 'chip-shisa' })).toMatchObject({ props: { borderStyle: 'round', borderColor: '#f08a24', backgroundColor: '#f08a2438', paddingX: 'sm' } })
+  expect(await band.find({ key: 'chip-usagi' })).toMatchObject({ props: { borderStyle: 'round', borderColor: '#00000000', backgroundColor: '#00000000', paddingX: 'sm' } })
   expect((await band.findAll({ type: 'Svg' })).length).toBeGreaterThanOrEqual(2)
   expect(await band.find({ key: 'to' })).toMatchObject({ props: { label: '보내기: 자동 ▾' } })
   expect(await band.find({ key: 'open' })).toMatchObject({ props: { label: '창 열기' } })
