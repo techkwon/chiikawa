@@ -253,3 +253,14 @@ test('the bobbing dot is one SVG with no script, and keeps still where movement 
   expect(moving).not.toMatch(/<script|on[a-z]+=|href=/i)
   expect(dotSource('red;}</style><script>', true)).not.toContain('<script')
 })
+
+test('a desktop pane narrower than a card draws its cards no wider than itself', KO, async ($, on) => {
+  world(on)
+  await handOut($, on)
+
+  const desk = await $.ui.mount({ plugin: 'chiikawa', surface: 'desktop', component: 'Pane', requestId: 'chiikawa', props: { ...PANE, bodyColumns: 20 } })
+
+  for (const id of ['shisa', 'kurimanju']) expect(Number((await desk.find({ key: `card-${id}` }))?.props.minWidth ?? 99)).toBeLessThanOrEqual(20)
+  await desk.unmount()
+
+})

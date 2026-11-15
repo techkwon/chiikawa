@@ -9,7 +9,7 @@ const GIF = 'R0lGODlhAQABAAAAACw='
 const SMALL = 'R0lGODlhAQABAIAAAP8='
 const BAND_FOLDER = `${FOLDER}/band`
 const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as const
-const BAND = { hasSurvey: false, isWorking: true, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
+const BAND = { hasSurvey: false, isCollapsed: false, isWorking: true, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
 const PANE = { title: '먼작귀', isFocused: false, bodyColumns: 72, placement: 'dock', scroll: { offset: 0, bodyRows: 50 }, view: {} } as const
 const SPAWN: AgentSpawnInput = {
   tool_use_id: 'toolu_1',
@@ -228,4 +228,13 @@ test('the stamp of the pictures is the same for the same ones and another for an
   expect(stampOf({ ...table, usagi: { done: table.usagi.idle } })).not.toBe(stampOf(table))
   expect(stampOf({ hachiware: table.hachiware })).not.toBe(stampOf(table))
   expect(stampOf({})).not.toBe('')
+})
+
+test('a picture named with more than the friend and one state is left out, and does not stand in for that state', KO, async ($, on) => {
+  world(on, [{ name: 'usagi-done-old.gif', size: 2000 }, { name: 'usagi.gif', size: 2000 }])
+  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
+
+  const said = (await $.command.run({ command: 'chiikawa', args: 'pictures', ...RUN })).text ?? ''
+
+  expect(said).toContain('1장')
 })

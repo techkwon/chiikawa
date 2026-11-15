@@ -559,7 +559,8 @@ export const GUESTS: readonly MemberId[] = WORKERS.filter(id => !CORE.includes(i
 export const ENDED_MS = 30_000
 
 export const seatOf = (scene: Scene, stage: readonly Task[], id: MemberId): Seat => {
-  const found = id === LEAD ? stage.find(isRunning) : stage.find(one => one.member === id)
+  // One at work is shown as at work, though another of its tasks waits.
+  const found = id === LEAD ? stage.find(isRunning) : (stage.find(one => one.member === id && isRunning(one)) ?? stage.find(one => one.member === id))
   // A task ended a while ago no longer marks its friend: the ✓ or ✗ goes, and the friend sits as resting.
   const task = found !== undefined && !isActive(found) && found.endedAt !== undefined && scene.now - found.endedAt > ENDED_MS ? undefined : found
   const helping = aidOf(scene, id)
@@ -734,11 +735,15 @@ export type Card = {
 
 /** The day so far, for 하치와레's card: the tasks that ended well, and the ones that failed; nothing before any has ended. */
 const tally = (scene: Scene): { done: number; failed: number } | undefined => {
-  const ended = scene.tasks.filter(task => !isActive(task))
+  // A demonstration is no work done: its pretend ends are not counted.
+  const ended = scene.tasks.filter(task => !isActive(task) && task.due === undefined)
   const failed = ended.filter(task => task.status === 'failed').length
 
   return ended.length === 0 ? undefined : { done: ended.length - failed, failed }
 }
+
+/** The task a friend is shown at: one running, else one waiting, else the newest. */
+export const taskShown = (own: readonly Task[]): Task | undefined => own.find(isRunning) ?? own.find(isActive) ?? own[0]
 
 /** A character's tasks, the newest first. */
 const tasksOf = (scene: Scene, id: MemberId): Task[] => scene.tasks.filter(task => task.member === id).sort((a, b) => b.startedAt - a.startedAt)
@@ -790,7 +795,7 @@ export const cardOf = (id: MemberId, scene: Scene): Card => {
   }
 
   const own = tasksOf(scene, id)
-  const task = own.find(isActive) ?? own[0]
+  const task = taskShown(own)
   const aid = aidOf(scene, id)
 
   if (aid !== undefined && (task === undefined || !isActive(task))) {

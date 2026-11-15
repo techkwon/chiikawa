@@ -11,7 +11,7 @@ import type { Lang, MemberId, Said } from '../types'
 
 import { CAST, CORE, isGesture, jobOf, LEAD, MEMBERS, ORDER, PINK, roleOf, shortName, shown, WORK_ROLES, WORKERS } from './cast'
 import type { Band, Card, PaneActs, Scene, Sheet } from './view'
-import { aidOf, bar, busyOf, MARK, cardOf, gaugeParts, GUESTS, hasRole, lastSaid, metersOf, onStage, seatOf, sheetOf, shownOf, spendersOf, spent, spentBy, waitingOf, waitingSaid } from './view'
+import { aidOf, bar, busyOf, MARK, cardOf, taskShown, gaugeParts, GUESTS, hasRole, lastSaid, metersOf, onStage, seatOf, sheetOf, shownOf, spendersOf, spent, spentBy, waitingOf, waitingSaid } from './view'
 import type { PictureState } from './pictures'
 import { bandPictureOf, pictureOf } from './pictures'
 import { WORDS } from './words'
@@ -54,7 +54,8 @@ export const artSource = (uri: string, side: number): string =>
 
 /** Which of a friend's pictures its card shows: waiting on a yes, at work (long at it: slow), its work ended well or not, or resting. */
 export const pictureState = (scene: Scene, card: Card): PictureState => {
-  const task = [...scene.tasks].filter(one => one.member === card.id).sort((a, b) => b.startedAt - a.startedAt)[0]
+  // The task the card is drawn at: the picture tells the same.
+  const task = taskShown([...scene.tasks].filter(one => one.member === card.id).sort((a, b) => b.startedAt - a.startedAt))
 
   if (task?.status === 'waiting') return 'waiting'
   if (card.isRunning) return task?.isSlow === true ? 'slow' : 'working'
@@ -274,7 +275,8 @@ const FriendCard = (kit: DeskKit, scene: Scene, card: Card, width: number, acts:
 /** Cards side by side as the width holds them, each as wide as the others. */
 const Cards = (kit: DeskKit, scene: Scene, cards: readonly Card[], columns: number, acts: PaneActs, key: string): RenderElement => {
   const across = Math.max(1, Math.floor((columns + 1) / (CARD_COLUMNS + 1)))
-  const width = Math.max(CARD_COLUMNS, Math.floor((columns - (across - 1)) / across))
+  // Never wider than the pane, however narrow it is.
+  const width = Math.max(1, Math.min(columns, Math.max(CARD_COLUMNS, Math.floor((columns - (across - 1)) / across))))
   // Two or more large pictures are past what one drawing can carry: then every card takes its small one.
   const isCrowded = cards.filter(card => pictureOf(card.id, pictureState(scene, card)) !== undefined).length > 1
 
@@ -586,7 +588,9 @@ const Chip = (kit: DeskKit, scene: Scene, id: MemberId, onSeat: (id: MemberId) =
   const tint: Color | undefined = seat.tint
   const card = cardOf(id, scene)
   // Only a small picture goes in the band: a large one leaves the whole band undrawn.
-  const face = spend(bandPictureOf(id, pictureState(scene, card)))
+  // The picture follows what the chip shows: a task ended a while ago has left its mark, and its picture goes with it.
+  const state: PictureState = seat.isBusy ? pictureState(scene, card) : seat.glyph === MARK.failed ? 'fail' : seat.glyph === MARK.done ? 'done' : seat.glyph === MARK.waiting ? 'waiting' : 'idle'
+  const face = spend(bandPictureOf(id, state))
 
   return (
     <Box key={`chip-${id}`} gap="xs" alignItems="center" {...frame}>

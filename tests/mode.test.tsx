@@ -23,7 +23,7 @@ const SPAWN: AgentSpawnInput = {
   fork: false,
 }
 
-const BAND = { hasSurvey: false, isWorking: true, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} }
+const BAND = { hasSurvey: false, isCollapsed: false, isWorking: true, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} }
 const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as const
 const PANE = { title: '먼작귀', isFocused: false, bodyColumns: 72, placement: 'dock', scroll: { offset: 0, bodyRows: 50 }, view: {} } as const
 
@@ -564,7 +564,7 @@ test('a prompt that was turned away does not count as having told the main loop'
   expect(seen[2]).toBeUndefined()
 })
 
-test('an Orca worker whose end cannot be learned is let go after an hour, and said to be', KO, async ($, on) => {
+test('an Orca worker whose end cannot be learned is let go after an hour, and said to be', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 5000 })
 
   mock.env(on, { HOME: '/home/me' })
@@ -1632,7 +1632,7 @@ test('a launch whose paths an inner shell fills in is a task with its command le
   await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })
 
-test('a result file one worker is waited for at does not end a second worker told to write there, and is counted once', KO, async ($, on) => {
+test('a result file one worker is waited for at does not end a second worker told to write there, and is counted once', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 5000 })
   const { put } = disk(on, clock, { [SPEC]: '# 찾기', [OTHER]: '# 다른 일' })
 
@@ -2287,4 +2287,166 @@ test('a background command done leaves no mark by its friend in the desktop band
   expect(chip).toBeDefined()
   expect(marks.length).toBe(0)
   await band.unmount()
+})
+
+test('a background command the main loop stops ends as stopped, and one whose notice never comes is let go after an hour', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const ids = ['bg1', 'bg2']
+
+  session(on)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('tool.call', ($, e) => ({ result: { stdout: '', stderr: '', ...(e.tool === 'Bash' && e.run_in_background === true ? { backgroundTaskId: ids.shift() } : {}) } }) as never)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: '개발 서버', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'npm run watch', description: '감시', run_in_background: true })
+  await $.tool.call({ tool: 'TaskStop', task_id: 'bg1' } as never)
+
+  const stopped = await roster($)
+
+  expect(stopped).toMatch(/개발 서버[^\n]*✗|✗[^\n]*개발 서버|중단됨/)
+  expect(stopped).toContain('감시')
+  // No notice ever comes for the other: after an hour its end cannot be learned, and it is let go.
+  await clock.advance(3_610_000)
+  expect(await roster($)).not.toContain('● 작업 중')
+})
+
+test('a demonstration started beside real work leaves that work its wave: the real one is counted when it ends', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const listed = [{ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' }]
+
+  session(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: listed }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await clock.advance(4000)
+  await $.command.run({ command: 'chiikawa', args: 'demo on', ...RUN })
+  const first = listed[0]
+
+  if (first !== undefined) first.status = 'completed'
+  await $.turn.complete({ durationMs: 1000, isAborted: false, turnId: 't1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' } as never)
+  await clock.advance(4000)
+
+  const after = await roster($)
+
+  expect(after).not.toMatch(/0개/)
+  await $.command.run({ command: 'chiikawa', args: 'demo off', ...RUN })
+})
+
+test('a demonstration ended while real work runs is not counted with it, nor in the work done today', { ...KO, timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1000 })
+  const listed = [{ id: 'agent_1', description: '🐹 치이카와 · 로그인 폼 구현', type: 'general-purpose', status: 'running' as 'running' | 'completed' }]
+  const toasts = session(on)
+
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'agent_1' }))
+  on('agent.list', () => ({ value: listed }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.command.run({ command: 'chiikawa', args: 'demo', ...RUN })
+  await clock.advance(18_000)
+  const first = listed[0]
+
+  if (first !== undefined) first.status = 'completed'
+  await $.turn.complete({ durationMs: 1000, isAborted: false, turnId: 't1', answer: '끝냈습니다.', agentId: 'agent_1', reason: 'answer' } as never)
+  await clock.advance(4000)
+
+  const after = await roster($)
+
+  expect(after).not.toMatch(/5개/)
+  expect(toasts.join('\n')).not.toMatch(/5개/)
+  // The pretend ends are not work done today: only the real one is counted.
+  const pane = await $.ui.mount({ plugin: 'chiikawa', surface: 'terminal', component: 'Pane', requestId: 'chiikawa', props: { ...PANE, scroll: { offset: 0, bodyRows: 60 } } })
+
+  expect(await pane.find({ type: 'Text', text: /오늘 한 일[^\n]*실패/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('a command read the same however many spaces stand between its words, and look takes only its own words', KO, async ($, on) => {
+  session(on)
+  on('theme.set', () => ({ value: { isDrawn: true as const, requestId: 'backdrop' } }))
+  on('theme.clear', () => ({ value: { isDrawn: false as const, reason: 'cleared' } }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  await $.session.start({ ...START, surface: 'desktop' })
+
+  expect((await $.command.run({ command: 'chiikawa', args: ' demo   off ', ...RUN })).text).toBe((await $.command.run({ command: 'chiikawa', args: 'demo off', ...RUN })).text)
+  expect((await $.command.run({ command: 'chiikawa', args: 'clear   all', ...RUN })).text).toBe((await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })).text)
+  const help = (await $.command.run({ command: 'chiikawa', args: 'look', ...RUN })).text
+
+  for (const word of ['constructor', 'tostring', '__proto__', 'valueof']) expect((await $.command.run({ command: 'chiikawa', args: `look ${word}`, ...RUN })).text).toBe(help)
+})
+
+test('a spec the same command writes before the worker runs is run as it is, not copied with its old text', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { written } = disk(on, clock, { [SPEC]: '# OLD TASK' })
+  const ran = shell(on)
+
+  session(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_a', command: `cat > ${SPEC} <<'EOF'\n# NEW TASK\nEOF\nfleet-run codex-scout --cwd /w --spec ${SPEC} --out /w/a/find.out.md` })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', command: `cp /w/a/new.md ${SPEC} && fleet-run codex-scout --cwd /w --spec ${SPEC}` })
+
+  expect(ran[0]).toContain(`--spec ${SPEC} --out`)
+  expect(ran[1]).toContain(`--spec ${SPEC}`)
+  expect(written).toEqual([])
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a change of folder in any form keeps a spec named from where the command stands from being read or copied', KO, async ($, on) => {
+  const clock = mock.clock(on, { now: 5000 })
+  const { written } = disk(on, clock, { '/w/a.md': '# here', '/w/sub/a.md': '# there' })
+  const ran = shell(on)
+
+  session(on)
+  await $.session.start(START)
+  for (const [index, command] of [
+    'orca terminal create --title t --command "cd sub && fleet-run codex-scout --cwd . --spec a.md --out b.md" --json',
+    "bash -c 'cd sub && fleet-run codex-scout --spec a.md'",
+    'pushd sub && fleet-run codex-scout --spec a.md',
+    'chdir sub; fleet-run codex-scout --spec a.md',
+    'cd;fleet-run codex-scout --spec a.md',
+    'if true; then cd sub; fi; fleet-run codex-scout --spec a.md',
+    'orca terminal create --title t --command="cd sub && fleet-run codex-scout --spec a.md" --json',
+  ].entries()) {
+    await $.tool.call({ tool: 'Bash', tool_use_id: `toolu_${index}`, command })
+    expect(ran.at(-1)).toBe(command)
+  }
+  expect(written).toEqual([])
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
+})
+
+test('a cd that is only words to print moves nothing: the spec beside the command is copied as ever', KO, async ($, on) => {
+  // A relative path is read where the session stands: these files are known by their names alone.
+  const files = new Map([['task.md', '# here']])
+  const written: string[] = []
+  const nameOf = (path: string): string => path.split('/').pop() ?? path
+  const ran = shell(on)
+
+  mock.clock(on, { now: 5000 })
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.read', ($, e) => {
+    const text = files.get(nameOf(e.path))
+
+    if (text === undefined) throw new Error('ENOENT')
+
+    return { value: text }
+  })
+  on('fs.write', ($, e) => {
+    written.push(nameOf(e.path))
+    files.set(nameOf(e.path), e.text)
+
+    return { value: undefined }
+  })
+  on('fs.stat', ($, e) => {
+    if (!files.has(nameOf(e.path))) throw new Error('ENOENT')
+
+    return { value: { kind: 'file' as const, size: 1, mtimeMs: 5000, isLink: false } }
+  })
+  session(on)
+  await $.tool.call({ tool: 'Bash', command: "echo 'cd' && fleet-run codex-scout --spec task.md --out result.md" })
+  expect(ran.at(-1)).toBe("echo 'cd' && fleet-run codex-scout --spec task.chiikawa-usagi.md --out result.md")
+  expect(written).toEqual(['task.chiikawa-usagi.md'])
+  await $.command.run({ command: 'chiikawa', args: 'clear all', ...RUN })
 })

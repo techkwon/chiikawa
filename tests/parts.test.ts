@@ -3,7 +3,8 @@ import { expect, test } from 'claude-code/testing'
 import { ART_COLUMNS, artRows, ARTS, ICON_COLUMNS, ICON_ROWS, iconOf, SPRITES } from '../hooks/art'
 import { CAST, CORE, isGesture, jobOf, MEMBERS, ORDER, pickMember, readingOf, roleOf, roleOfAgent, rolesFrom, say, shown, specialistOf, toneOf, withRole, WORKERS } from '../hooks/cast'
 import { findFleetRuns, voicedSpecPath } from '../hooks/orca'
-import { cells, ENDED_MS, fit, onStage, planOf, seatOf, spentBy, ZERO } from '../hooks/view'
+import { pictureState } from '../hooks/desk'
+import { cardOf, cells, ENDED_MS, fit, onStage, planOf, seatOf, spentBy, ZERO } from '../hooks/view'
 import type { Scene } from '../hooks/view'
 import { firstLine, firstLines, leaderSection, MARKS, memberBlock, memberNamed, namedMember, orcaBlock, pickNote, roleNamed, roleNote, unvoiced } from '../hooks/voice'
 import { asIs } from '../hooks/words'
@@ -916,4 +917,18 @@ test('an ended task marks its friend in the band for a while, and then the frien
   const helping: Scene = { ...scene(), now: 65_000, aids: { hachiware: { what: asIs('Bash'), at: 64_000, saidAt: 64_000, since: 0 } } }
 
   expect(seatOf(helping, onStage(helping), 'hachiware').time).toBe(' 1:05')
+})
+
+test('a friend with one task running and a newer one waiting is shown at work, and one waiting with a newer one done is shown waiting, picture and all', () => {
+  const at = (member: Task['member'], status: Task['status'], startedAt: number, id: string): Task => ({ ...task(member, status), id, startedAt, ...(status === 'done' ? { endedAt: startedAt + 1000 } : {}) })
+  const working = { ...scene([at('usagi', 'running', 1000, 'u1'), at('usagi', 'waiting', 2000, 'u2')]), now: 4000 }
+
+  expect(cardOf('usagi', working).isRunning).toBe(true)
+  expect(seatOf(working, onStage(working), 'usagi').isBusy).toBe(true)
+  expect(pictureState(working, cardOf('usagi', working))).toBe('working')
+
+  const waiting = { ...scene([at('usagi', 'waiting', 1000, 'u1'), at('usagi', 'done', 2000, 'u2')]), now: 4000 }
+
+  expect(cardOf('usagi', waiting).status).toMatch(/^◐/)
+  expect(pictureState(waiting, cardOf('usagi', waiting))).toBe('waiting')
 })

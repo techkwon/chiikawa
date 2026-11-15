@@ -150,6 +150,23 @@ const seePictures = async ($: Engine): Promise<void> => {
   picturesSeen = stamp
 }
 
+/**
+ * Whether a command writes a file, by its path or its own name, outside the one place given: a redirection to it, or a
+ * program that writes or replaces files with it among its words. Reading it, or a variable set to it, is no write.
+ */
+const isWrittenElsewhere = (command: string, [start, end]: readonly [number, number], path: string): boolean => {
+  const name = (path.split('/').pop() ?? path).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const rest = `${command.slice(0, start)} ${command.slice(end)}`
+  const ends = `(?=$|[\\s'";&|)<>])`
+
+  if (name === '') return false
+
+  return (
+    new RegExp(`>[>|]?\\s*['"]?(?:[^\\s'";&|<>]*/)?${name}${ends}`).test(rest) ||
+    new RegExp(`(?:^|[\\s;&|(])(?:tee|cp|mv|install|ln|rsync|touch|truncate|dd|curl|wget|sed\\s+-i)\\b[^;&|\\n]*?(?:[\\s'"/=])${name}${ends}`).test(rest)
+  )
+}
+
 /** Reads the person's picture folder and keeps what it holds in the session's state, which redraws every drawing that shows them. */
 const keepPictures = async ($: Engine): Promise<PicturesRead> => {
   // The reading fills the module's own place: a drawing made meanwhile, or after, reads the table again.
@@ -398,6 +415,7 @@ const reserve = ($: Engine, draft: Draft, wanted?: MemberId, hint = ''): Promise
       // takes the task, so that two launches taken at once do not both have it.
       const isShared = out !== undefined && list.some(task => task.id !== draft.id && task.kind === 'orca' && task.out === out && (isActive(task) || isDoubted(task, now)))
 
+      // A wave starts with nobody at work, demonstration or not: one started beside real work keeps that work's start, so it is counted whole.
       box.isWaveStart = !list.some(isActive)
       box.busy = new Set([...list.filter(isActive).map(task => task.member), member]).size
       box.task = {
@@ -604,9 +622,12 @@ const settle = ($: Engine, id: string, outcome: Outcome): Promise<void> =>
     const toasts = [`${MEMBERS[ended.member].mark} ${CAST[spoke].names[ended.member]} ${shown(ended.quote[spoke])} ${ended.note[spoke]}`]
 
     if (reading !== undefined) lines.push([LEAD, situation, reading, inAll(lang => (isOk ? WORDS[lang].reading : WORDS[lang].mourning)(CAST[lang].names[ended.member]))])
-    if (!box.all.some(isActive)) {
+    // A demonstration and real work are each a wave of their own: a pretend failure is not told as one of the real work.
+    const isSame = (task: Task): boolean => isDemoTask(task) === isDemoTask(ended)
+
+    if (!box.all.some(task => isSame(task) && isActive(task))) {
       const since = await read($, waveAt)
-      const wave = box.all.filter(task => task.startedAt >= since)
+      const wave = box.all.filter(task => isSame(task) && task.startedAt >= since)
       const failed = wave.filter(task => task.status === 'failed').length
       const quote = inAll(lang => (failed > 0 ? CAST[lang].leader.cheer : wave.length >= 2 ? CAST[lang].leader.sweep : CAST[lang].leader.allDone))
       const note = inAll(lang => (failed > 0 ? WORDS[lang].waveFailed(wave.length, failed) : WORDS[lang].waveDone(wave.length)))
@@ -976,6 +997,8 @@ const tick = async ($: Engine): Promise<void> => {
     for (const task of active) {
       if (task.kind === 'orca') await checkWorker($, task, now)
       else if (task.kind === 'agent' && agents !== undefined) await checkAgent($, task, agents, now)
+      // A background command whose notice never came after an hour has an end that cannot be learned: it is let go, as a worker with no result.
+      else if (task.kind === 'shell' && now - task.startedAt > LOST_MS) await letGo($, task.id, now, words => words.lost)
       // A subagent's task no agent was told to be whose after two hours has an end that cannot be learned, as a worker's with no result: it is let go.
       if (isUnnamed(task) && now - task.startedAt > LOST_MS * 2) await letGo($, task.id, now, words => words.lost)
     }
@@ -1317,6 +1340,13 @@ const watchShell = async ($: Engine, call: string, background: string, command: 
   await reserve($, { id: `shell:${background}`, kind: 'shell', role: shellRole(command), engine: 'Bash', title, call })
 }
 
+/** Ends a background command the main loop stopped, if it is still at work. */
+const stopShell = async ($: Engine, id: string): Promise<void> => {
+  const task = (await read($, tasks)).find(one => one.id === `shell:${id}` && isActive(one))
+
+  if (task !== undefined) await settle($, task.id, { isOk: false, why: words => words.stopped })
+}
+
 /** What a background task's notification says: its id, how it ended, and its one-line summary. */
 const NOTICE = /<task-notification>([\s\S]*?)<\/task-notification>/g
 const field = (block: string, name: string): string | undefined => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(block)?.[1]?.trim()
@@ -1409,7 +1439,8 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'chiikawa' }, async ($, e) => {
-    const asked = e.args.trim().toLowerCase()
+    // However many spaces the person put between the words, they are read as one.
+    const asked = e.args.trim().replace(/\s+/g, ' ').toLowerCase()
 
     await ensure($).catch(() => undefined)
     // A theme or a language changed since the last prompt is followed from this command: no setting is watched as it is made.
@@ -1490,7 +1521,9 @@ export const register: Register = (on, options) => {
     const [verb = '', ...words] = asked.split(/\s+/)
 
     if (verb === 'look' || verb === '배경' || verb === '背景') {
-      const how = LOOK_WORDS[words[0] ?? '']
+      const word = words[0] ?? ''
+      // Only the table's own words: a name every object has, `constructor` among them, is not a choice.
+      const how = Object.hasOwn(LOOK_WORDS, word) ? LOOK_WORDS[word] : undefined
 
       if (how === 'off') {
         const isKept = await keepLook($, 'off')
@@ -1682,6 +1715,15 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && e.tool !== 'Agent' && !isFleet) {
       // The main loop's own work: the three are seen at it together.
       if (isTrioShown && (await read($, isOn).catch(() => false))) await lend($, e.tool, detailOf(e)).catch(() => undefined)
+      if (e.tool === 'TaskStop') {
+        const stopped = await next(e)
+        const id = e.task_id ?? e.shell_id
+
+        // A background command stopped by the main loop has ended: no notice may come for it.
+        if (id !== undefined && stopped.deny === undefined && stopped.isError !== true) await stopShell($, id).catch(() => undefined)
+
+        return stopped
+      }
       if (e.tool !== 'Bash') return next(e)
       const ran = await next(e)
       // Left running in the background, asked for or moved there: a character watches it to its end.
@@ -1699,7 +1741,9 @@ export const register: Register = (on, options) => {
 
     if (e.tool === 'Bash' && isFleet) {
       const home = await $.env.get('HOME').catch(() => undefined)
-      const isMoved = /(?:^|[\s;&(])cd\s/.test(command)
+      // Any change of folder in the command, in any quoting: a path not from the root is then not read where the command reads it.
+      // Only where a command stands, after a separator or opening a script given to a shell: `echo 'cd'` moves nothing.
+      const isMoved = /(?:^|[;&|(){}\n!]|\b(?:then|do|else|time|exec|command|builtin)\s|(?:\s-c|--command)[\s=]+['"]?)\s*(?:cd|pushd|popd|chdir)(?=$|[\s;&|)])/.test(command)
       const usable = (path: string | undefined): string | undefined =>
         path === undefined || (isMoved && !path.startsWith('/')) ? undefined : path
       const made: { task: Task; run: FleetRun; voiced?: string; isShared: boolean; isUncopied: boolean }[] = []
@@ -1716,7 +1760,9 @@ export const register: Register = (on, options) => {
         // A spec that already ends in a character's block is run as it is, and its worker talks as that character: the task is that one's.
         const cast = isCast ? castIn(text) : undefined
         const task = await reserve($, draft, cast)
-        const voiced = spec === undefined || text === undefined || isCast || run.specSpan === undefined ? undefined : await voiceSpec($, spec, text, task)
+        // A command that names its spec anywhere else may write it before the worker runs: a copy made now would hold the old text, so it runs as it is.
+        const isTouched = spec !== undefined && run.specSpan !== undefined && isWrittenElsewhere(command, run.specSpan, spec)
+        const voiced = spec === undefined || text === undefined || isCast || isTouched || run.specSpan === undefined ? undefined : await voiceSpec($, spec, text, task)
         // A result file another worker is still waited for at was not given to this one: its end is not read off it.
         const isShared = out !== undefined && task.out === undefined
 

@@ -100,9 +100,11 @@ async function readFolder($: EngineInterface, folder: string, prefix: string, mo
     const lower = entry.name.toLowerCase()
     const dot = lower.lastIndexOf('.')
     const kind = dot < 0 ? undefined : KINDS[lower.slice(dot + 1)]
-    const [id, state = 'base'] = (dot < 0 ? lower : lower.slice(0, dot)).split('-') as [MemberId, PictureState | 'base' | undefined]
+    const parts = (dot < 0 ? lower : lower.slice(0, dot)).split('-')
+    const [id, state = 'base'] = parts as [MemberId, PictureState | 'base' | undefined]
 
-    if (entry.kind !== 'file' || kind === undefined || !ORDER.includes(id) || (state !== 'base' && !PICTURE_STATES.includes(state))) continue
+    // A name is the friend's, or the friend's and one state: `usagi-done-old.gif` is neither, and is not taken for `usagi-done.gif`.
+    if (entry.kind !== 'file' || kind === undefined || parts.length > 2 || !ORDER.includes(id) || (state !== 'base' && !PICTURE_STATES.includes(state))) continue
     if (entry.size > most) {
       read.skipped.push({ file: `${shown}${entry.name}`, why: 'large' })
       continue
