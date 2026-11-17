@@ -79,6 +79,9 @@ export const langKeptFrom = (kept: unknown): LangKept => {
   return { ...(chosen === undefined ? {} : { chosen }), ...(typed === undefined ? {} : { typed }) }
 }
 
+/** A season of the meadow, as the words name it. */
+type SeasonWord = 'spring' | 'summer' | 'autumn' | 'winter'
+
 /**
  * Everything the screen and the command's answers say, in one language. A
  * sentence that holds a value is a function, and what a language does to a
@@ -240,6 +243,12 @@ export type Words = {
   /** Added where the choice could not be saved for later sessions. */
   lookNotKept: string
   lookHelp: (state: 'auto' | 'day' | 'night' | 'off') => string
+  /** `/chiikawa look season ...`: the meadow's season was fixed, or set to follow the month; `season` is the one drawn now. */
+  lookSeason: (season: SeasonWord, isFixed: boolean) => string
+  /** Added to it where the look is off, so nothing is drawn now. */
+  lookSeasonOff: string
+  /** The season as it stands, and the words that choose one. */
+  lookSeasonHelp: (season: SeasonWord, isFixed: boolean) => string
   pictures: (folder: string, found: string[], files: number, small: number, skipped: { file: string; why: 'large' | 'unread' }[]) => string
   talkOnly: string
   talkAll: string
@@ -427,7 +436,7 @@ const KO: Words = {
   demoReport: title => `시연이라 실제로 한 일은 없어요 (${title})`,
 
   description: '치이카와 모드: 먼작귀 친구들 현황 패널을 열거나 켜고 끈다',
-  argumentHint: '[on|off|usage|talk|role [친구 역할]|lang [auto|en|ko|ja]|look [on|day|night|off]|pictures|clear [all]|demo [on|off]|auto|친구 이름]',
+  argumentHint: '[on|off|usage|talk|role [친구 역할]|lang [auto|en|ko|ja]|look [on|day|night|off|season [spring|summer|autumn|winter|auto]]|pictures|clear [all]|demo [on|off]|auto|친구 이름]',
   turnedOn: '치이카와 모드를 켰어요.',
   turnedOff: '치이카와 모드를 껐어요. /chiikawa on 으로 다시 켭니다.',
   cleared: '끝난 작업과 대화 기록을 지웠어요. 친구별 보수(누적 사용량)는 그대로예요. 진행 중으로 남은 것과 보수까지 지우려면 /chiikawa clear all',
@@ -437,13 +446,26 @@ const KO: Words = {
   demoHeld: '시연을 켰어요. 가짜 작업 4개가 끌 때까지 계속 일하는 중으로 남아요. 끝내려면 /chiikawa demo off',
   demoStopped: '시연을 껐어요. 가짜 작업 4개가 지금 끝나요(3개 성공, 1개 실패).',
   demoNone: '켜 둔 시연이 없어요. /chiikawa demo on 으로 켤 수 있어요.',
-  lookOn: '데스크톱 앱에 먼작귀 들판 배경과 색을 입혔어요. 낮에는 분홍빛 들판, 밤(다크 모드)에는 별이 반짝이는 하늘이에요. 끄려면 /chiikawa look off',
+  lookOn: '데스크톱 앱에 먼작귀 들판 배경과 색을 입혔어요. 낮에는 계절에 맞는 들판, 밤(다크 모드)에는 별이 반짝이는 하늘이에요. 끄려면 /chiikawa look off',
   lookNotKept: '다만 다음 세션까지 저장하지 못해서, 이번 세션에만 적용돼요.',
   lookOff: '배경과 색을 뺐어요. 다음 세션에서도 꺼진 채로 둘게요. 다시 켜려면 /chiikawa look on',
   lookUndrawn: reason => `배경과 색을 정해 두었지만 지금 이 화면은 그리지 않아요(${reason}). 데스크톱 앱 Code 탭의 로컬 세션에서 보여요.`,
-  lookDay: '앱 전체를 분홍빛 낮 들판으로 바꿨어요. 앱이 다크 모드여도 밝은 낮 색으로 칠해요. 앱 모드를 따르게 하려면 /chiikawa look on',
+  lookDay: '앱 전체를 낮 들판으로 바꿨어요. 앱이 다크 모드여도 밝은 낮 색으로 칠해요. 앱 모드를 따르게 하려면 /chiikawa look on',
   lookNight: '앱 전체를 별이 반짝이는 밤하늘로 바꿨어요. 앱이 라이트 모드여도 어두운 밤 색으로 칠해요. 앱 모드를 따르게 하려면 /chiikawa look on',
   lookHelp: state => `데스크톱 배경과 색: ${{ auto: '켜짐(앱 모드를 따름)', day: '낮으로 고정', night: '밤으로 고정', off: '꺼짐' }[state]}. /chiikawa look on(앱 모드를 따름) · day(낮 고정) · night(밤 고정) · off(끄기). 데스크톱 앱 Code 탭의 로컬 세션에서만 보여요(터미널은 그대로예요).`,
+  lookSeason: (season, isFixed) => {
+    const name = { spring: '봄', summer: '여름', autumn: '가을', winter: '겨울' }[season]
+
+    return isFixed
+      ? `들판의 계절을 ${name}에 고정했어요. 달에 맞춰 바뀌게 하려면 /chiikawa look season auto`
+      : `들판이 이제 달에 맞춰 계절을 따라가요(3~5월 봄, 6~8월 여름, 9~11월 가을, 12~2월 겨울). 지금은 ${name}이에요.`
+  },
+  lookSeasonOff: '배경이 꺼져 있어서 지금은 보이지 않아요. /chiikawa look on 으로 켜면 이 계절로 그려요.',
+  lookSeasonHelp: (season, isFixed) => {
+    const name = { spring: '봄', summer: '여름', autumn: '가을', winter: '겨울' }[season]
+
+    return `들판의 계절: ${isFixed ? `${name}(고정)` : `자동(지금은 ${name})`}. /chiikawa look season spring(봄) · summer(여름) · autumn(가을) · winter(겨울) · auto(달에 맞춤).`
+  },
   pictures: (folder, found, files, small, skipped) =>
     `${found.length === 0 ? `${folder} 에서 쓸 그림을 못 찾았어요. 친구 영어 이름으로 넣어 주세요(hachiware.gif, 상태별은 hachiware-working.gif 처럼).` : `카드에 내 그림 ${files}장을 넣었어요: ${found.join(', ')}.${small === 0 ? ' 프롬프트 위 줄은 band 폴더의 작은 그림(10KB 이하)만 쓰고, 없으면 이모지로 둬요.' : ` 프롬프트 위 줄에는 band 폴더의 작은 그림 ${small}장을 써요.`}`}${skipped.length === 0 ? '' : ` 뺀 파일: ${skipped.map(one => `${one.file}(${one.why === 'large' ? `${one.file.startsWith('band/') ? '10' : '48'}KB보다 커요` : '읽지 못했어요'})`).join(', ')}.`}`,
   talkOnly: '패널에 이야기만 보여요. 한 번 더 입력하거나 패널의 `전체 보기`를 누르면 돌아가요.',
@@ -636,7 +658,7 @@ const EN: Words = {
   demoReport: title => `This was a demo, so nothing was really done (${title})`,
 
   description: "Chiikawa mode: open the friends' status pane, or turn the mode on and off",
-  argumentHint: '[on|off|usage|talk|role [friend role]|lang [auto|en|ko|ja]|look [on|day|night|off]|pictures|clear [all]|demo [on|off]|auto|friend]',
+  argumentHint: '[on|off|usage|talk|role [friend role]|lang [auto|en|ko|ja]|look [on|day|night|off|season [spring|summer|autumn|winter|auto]]|pictures|clear [all]|demo [on|off]|auto|friend]',
   turnedOn: 'Chiikawa mode is on.',
   turnedOff: 'Chiikawa mode is off. Turn it back on with /chiikawa on.',
   cleared: "Cleared the finished tasks and the conversation. Each friend's pay (the usage so far) is kept. To clear what is still listed as running and the pay as well: /chiikawa clear all",
@@ -646,13 +668,19 @@ const EN: Words = {
   demoHeld: 'The demo is on. Its four made-up tasks stay at work until you turn it off with /chiikawa demo off.',
   demoStopped: 'The demo is off. Its four made-up tasks end now (3 done, 1 failed).',
   demoNone: 'No demo is on. Turn one on with /chiikawa demo on.',
-  lookOn: 'The desktop app now has the Chiikawa meadow behind the conversation and its colors: a pink meadow by day, a starry sky in dark mode. Take it off with /chiikawa look off',
+  lookOn: 'The desktop app now has the Chiikawa meadow behind the conversation and its colors: the meadow of the season by day, a starry sky in dark mode. Take it off with /chiikawa look off',
   lookNotKept: 'It could not be saved for later sessions, so it holds for this session only.',
   lookOff: 'Took the meadow and its colors off, and they stay off in later sessions. Put them back with /chiikawa look on',
   lookUndrawn: reason => `The meadow and its colors are set, but nothing here draws them now (${reason}). They show in local sessions in the desktop app's Code tab.`,
-  lookDay: "The whole app is now the pink daytime meadow, even while the app is in dark mode. To follow the app's mode again: /chiikawa look on",
+  lookDay: "The whole app is now the daytime meadow, even while the app is in dark mode. To follow the app's mode again: /chiikawa look on",
   lookNight: "The whole app is now the starry night sky, even while the app is in light mode. To follow the app's mode again: /chiikawa look on",
   lookHelp: state => `Desktop meadow and colors: ${{ auto: "on (follows the app's mode)", day: 'always day', night: 'always night', off: 'off' }[state]}. /chiikawa look on (follows the app's mode) · day · night · off. Only the desktop app's Code tab draws them, in local sessions (the terminal keeps its look).`,
+  lookSeason: (season, isFixed) =>
+    isFixed
+      ? `The meadow now stays in ${season}. To let it follow the month again: /chiikawa look season auto`
+      : `The meadow now follows the month (Mar-May spring, Jun-Aug summer, Sep-Nov autumn, Dec-Feb winter). It is ${season} now.`,
+  lookSeasonOff: 'The meadow is off, so nothing shows now. Turn it on with /chiikawa look on and it is drawn in this season.',
+  lookSeasonHelp: (season, isFixed) => `Meadow season: ${isFixed ? `always ${season}` : `follows the month (${season} now)`}. /chiikawa look season spring · summer · autumn · winter · auto (follows the month).`,
   pictures: (folder, found, files, small, skipped) =>
     `${found.length === 0 ? `No pictures found in ${folder}. Name them by friend (hachiware.gif), or by state (hachiware-working.gif).` : `The cards now use your ${files} pictures: ${found.join(', ')}.${small === 0 ? ' The band above the prompt takes only small pictures (10 KB or less) from the band folder, and keeps the emoji without them.' : ` The band above the prompt uses ${small} small pictures from the band folder.`}`}${skipped.length === 0 ? '' : ` Left out: ${skipped.map(one => `${one.file} (${one.why === 'large' ? `over ${one.file.startsWith('band/') ? '10' : '48'} KB` : 'could not be read'})`).join(', ')}.`}`,
   talkOnly: 'The pane now shows the talk alone. Run this again, or press `Show all` in the pane, to go back.',
@@ -841,7 +869,7 @@ const JA: Words = {
   demoReport: title => `デモなので、実際には何もしていません (${title})`,
 
   description: 'ちいかわモード: ともだちの状況パネルを開く、モードをオン・オフする',
-  argumentHint: '[on|off|usage|talk|role [ともだち 役割]|lang [auto|en|ko|ja]|look [on|day|night|off]|pictures|clear [all]|demo [on|off]|auto|ともだちの名前]',
+  argumentHint: '[on|off|usage|talk|role [ともだち 役割]|lang [auto|en|ko|ja]|look [on|day|night|off|season [spring|summer|autumn|winter|auto]]|pictures|clear [all]|demo [on|off]|auto|ともだちの名前]',
   turnedOn: 'ちいかわモードをオンにしました。',
   turnedOff: 'ちいかわモードをオフにしました。/chiikawa on でまたオンにできます。',
   cleared: '終わった作業と会話の記録を消しました。ともだち別の報酬（累計使用量）はそのままです。進行中として残っているものと報酬まで消すには /chiikawa clear all',
@@ -851,13 +879,26 @@ const JA: Words = {
   demoHeld: 'デモをオンにしました。見せかけの作業4件が、オフにするまで作業中のまま残ります。終えるには /chiikawa demo off',
   demoStopped: 'デモをオフにしました。見せかけの作業4件が今終わります(3件成功、1件失敗)。',
   demoNone: 'オンになっているデモはありません。/chiikawa demo on でオンにできます。',
-  lookOn: 'デスクトップアプリに、ちいかわの野原の背景と色をつけました。昼はピンクの野原、ダークモードでは星がまたたく夜空です。外すには /chiikawa look off',
+  lookOn: 'デスクトップアプリに、ちいかわの野原の背景と色をつけました。昼は季節の野原、ダークモードでは星がまたたく夜空です。外すには /chiikawa look off',
   lookNotKept: 'ただ、次のセッションまで保存できなかったので、このセッションだけに効きます。',
   lookOff: '背景と色を外しました。次のセッションでも外したままにします。戻すには /chiikawa look on',
   lookUndrawn: reason => `背景と色は設定しましたが、いまこの画面には描かれません（${reason}）。デスクトップアプリの Code タブのローカルセッションで表示されます。`,
-  lookDay: 'アプリ全体をピンクの昼の野原にしました。アプリがダークモードでも明るい昼の色で塗ります。アプリのモードに合わせるには /chiikawa look on',
+  lookDay: 'アプリ全体を昼の野原にしました。アプリがダークモードでも明るい昼の色で塗ります。アプリのモードに合わせるには /chiikawa look on',
   lookNight: 'アプリ全体を星がまたたく夜空にしました。アプリがライトモードでも暗い夜の色で塗ります。アプリのモードに合わせるには /chiikawa look on',
   lookHelp: state => `デスクトップの背景と色: ${{ auto: 'オン（アプリのモードに合わせる）', day: '昼に固定', night: '夜に固定', off: 'オフ' }[state]}。/chiikawa look on（モードに合わせる）· day（昼）· night（夜）· off（オフ）。デスクトップアプリの Code タブのローカルセッションだけで表示されます（ターミナルはそのまま）。`,
+  lookSeason: (season, isFixed) => {
+    const name = { spring: '春', summer: '夏', autumn: '秋', winter: '冬' }[season]
+
+    return isFixed
+      ? `野原の季節を${name}に固定しました。月に合わせて変わるようにするには /chiikawa look season auto`
+      : `野原が月に合わせて季節を追うようになりました（3〜5月は春、6〜8月は夏、9〜11月は秋、12〜2月は冬）。いまは${name}です。`
+  },
+  lookSeasonOff: '背景がオフなので、いまは表示されません。/chiikawa look on でオンにすると、この季節で描きます。',
+  lookSeasonHelp: (season, isFixed) => {
+    const name = { spring: '春', summer: '夏', autumn: '秋', winter: '冬' }[season]
+
+    return `野原の季節: ${isFixed ? `${name}（固定）` : `自動（いまは${name}）`}。/chiikawa look season spring（春）· summer（夏）· autumn（秋）· winter（冬）· auto（月に合わせる）。`
+  },
   pictures: (folder, found, files, small, skipped) =>
     `${found.length === 0 ? `${folder} に使える絵がありません。ともだちの英語名で置いてください（hachiware.gif、状態ごとなら hachiware-working.gif）。` : `カードに自分の絵を${files}枚使いました: ${found.join('、')}。${small === 0 ? 'プロンプトの上の帯は band フォルダの小さな絵（10KB 以下）だけを使い、なければ絵文字のままです。' : `プロンプトの上の帯には band フォルダの小さな絵を${small}枚使います。`}`}${skipped.length === 0 ? '' : ` 除いたファイル: ${skipped.map(one => `${one.file}（${one.why === 'large' ? `${one.file.startsWith('band/') ? '10' : '48'}KB より大きい` : '読めない'}）`).join('、')}。`}`,
   talkOnly: 'パネルにはなしだけを表示します。もう一度入力するか、パネルの `ぜんぶ表示` を押すと戻ります。',

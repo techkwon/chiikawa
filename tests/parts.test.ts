@@ -1430,7 +1430,7 @@ test('a launch exits as its command does only where it is the last thing the com
   for (const last of [F, `cd /w; ${F}`, `cd /w && ${F}`, `echo a\n${F}\n# done\n`, `${F} > /w/log 2>&1`, `nohup ${F}`, `env X=1 ${F}`, `timeout 600 ${F}`, `(cd /w; ${F})`, `sh -c '${F}'`, `bash -lc "cd /w && ${F}"`, `echo a | cat; ${F};`, `{ ${F}; }`, `{ cd /w; ${F}; }`, `{\n  ${F}\n} 2>/w/log`, `{ { ${F}; }; }`]) {
     expect(`${last} ${owns(last)}`).toBe(`${last} own`)
   }
-  for (const other of [`${F} || true`, `${F} 2>&1 | tail -5`, `${F}; echo done`, `${F} && echo ok`, `if ${F}; then echo ok; fi`, `! ${F}`, `${F} &`, `echo a | ${F}`, `{ ${F}; } | cat`, `{ ${F}; }; echo done`, `{ ${F}; } || true`, `(${F}) | cat`, `(${F}) &`, `{ ${F}; } &`, `if true; then { ${F}; }; fi`, `for x in a; do ${F}; done`, `echo $(${F})`, `sh -c '${F}; echo done'`, `sh -c '${F}' | cat`, `sh -c '${F}'; echo done`, `while ${F}; do sleep 1; done`]) {
+  for (const other of [`${F} || true`, `${F} 2>&1 | tail -5`, `${F}; echo done`, `${F} && echo ok`, `${F}; > /dev/null`, `${F}; >/dev/null `, `${F}\n> /dev/null`, `${F}; ( > /dev/null )`, `${F}; { > /dev/null; }`, `if ${F}; then echo ok; fi`, `! ${F}`, `${F} &`, `echo a | ${F}`, `{ ${F}; } | cat`, `{ ${F}; }; echo done`, `{ ${F}; } || true`, `(${F}) | cat`, `(${F}) &`, `{ ${F}; } &`, `if true; then { ${F}; }; fi`, `for x in a; do ${F}; done`, `echo $(${F})`, `sh -c '${F}; echo done'`, `sh -c '${F}' | cat`, `sh -c '${F}'; echo done`, `while ${F}; do sleep 1; done`]) {
     expect(`${other} ${owns(other)}`).toBe(`${other} not`)
   }
   // Behind a `!`, a parenthesis, a group or a pipeline exits as the other of what it ran: no launch in it, however deep, exits as the command does.

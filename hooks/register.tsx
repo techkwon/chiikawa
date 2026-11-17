@@ -7,8 +7,8 @@ import type { Situation } from './cast'
 import { CAST, isActive, jobOf, LEAD, MEMBERS, MOODS, pickMember, PROFILES, readingOf, reported, roleOf, roleOfAgent, rolesFrom, say, shown, specialistOf, titleOf, toneOf, withRole, WORK_ROLES, WORKERS } from './cast'
 import type { FleetRun } from './orca'
 import { findFleetRuns, readMeta, squeezed, voicedSpecPath } from './orca'
-import { clearLook, keepLook, lookKept, SCENES, sceneAsked, setLook, unpainted } from './look'
-import type { LookKept } from './look'
+import { clearLook, keepLook, keepSeason, lookKept, SCENES, sceneAsked, seasonKept, seasonNow, setLook, unpainted } from './look'
+import type { LookKept, SeasonKept } from './look'
 import { artSource, drawDeskBand, drawDeskPane, drawDeskTurn } from './desk'
 import { bandPictureOf, loadPictures, type PicturesRead, stampOf, usePictures } from './pictures'
 import type { Kit, Scene } from './view'
@@ -1823,6 +1823,16 @@ const LOOK_WORDS: Record<string, LookKept> = {
   off: 'off', 끄기: 'off', オフ: 'off',
 }
 
+/** The words that open `/chiikawa look season`, and the ones that name a season after it, in the three languages. */
+const SEASON_VERBS = new Set(['season', 'seasons', '계절', '季節'])
+const SEASON_WORDS: Record<string, SeasonKept> = {
+  spring: 'spring', 봄: 'spring', 春: 'spring', はる: 'spring',
+  summer: 'summer', 여름: 'summer', 夏: 'summer', なつ: 'summer',
+  autumn: 'autumn', fall: 'autumn', 가을: 'autumn', 秋: 'autumn', あき: 'autumn',
+  winter: 'winter', 겨울: 'winter', 冬: 'winter', ふゆ: 'winter',
+  auto: 'auto', 자동: 'auto', 自動: 'auto',
+}
+
 const pressed = ($: Engine, act: () => Promise<unknown>): void =>
   void ensure($)
     .catch(() => undefined)
@@ -1859,7 +1869,7 @@ export const register: Register = (on, options) => {
 
       if (kept !== 'off') {
         if (unpainted !== undefined) $.ui.toast(unpainted)
-        await setLook($, kept).catch(() => undefined)
+        await setLook($, kept, await seasonNow($)).catch(() => undefined)
       }
     }
     timer?.cancel()
@@ -1974,6 +1984,23 @@ export const register: Register = (on, options) => {
       // Only the table's own words: a name every object has, `constructor` among them, is not a choice.
       const how = Object.hasOwn(LOOK_WORDS, word) ? LOOK_WORDS[word] : undefined
 
+      if (SEASON_VERBS.has(word)) {
+        const named = words[1] ?? ''
+        const wanted = Object.hasOwn(SEASON_WORDS, named) ? SEASON_WORDS[named] : undefined
+
+        if (wanted === undefined) return { text: said.lookSeasonHelp(await seasonNow($), (await seasonKept($)) !== 'auto') }
+        const isKept = await keepSeason($, wanted)
+        const season = await seasonNow($)
+        const done = said.lookSeason(season, wanted !== 'auto')
+        const told = isKept ? done : `${done} ${said.lookNotKept}`
+        const time = await lookKept($)
+
+        // The season is kept either way; a look that is off stays off, and is drawn in this season once it is on.
+        if (time === 'off') return { text: `${told} ${said.lookSeasonOff}` }
+        const set = await setLook($, time, season).catch((error: unknown) => ({ isDrawn: false, reason: String(error) }))
+
+        return { text: set.isDrawn ? told : `${told} ${said.lookUndrawn(set.reason ?? '')}` }
+      }
       if (how === 'off') {
         const isKept = await keepLook($, 'off')
 
@@ -1983,7 +2010,7 @@ export const register: Register = (on, options) => {
       }
       if (how !== undefined) {
         const isKept = await keepLook($, how)
-        const set = await setLook($, how).catch((error: unknown) => ({ isDrawn: false, reason: String(error) }))
+        const set = await setLook($, how, await seasonNow($)).catch((error: unknown) => ({ isDrawn: false, reason: String(error) }))
 
         if (!set.isDrawn) return { text: said.lookUndrawn(set.reason ?? '') }
         const done = how === 'day' ? said.lookDay : how === 'night' ? said.lookNight : said.lookOn
@@ -1991,7 +2018,7 @@ export const register: Register = (on, options) => {
         return { text: isKept ? done : `${done} ${said.lookNotKept}` }
       }
 
-      return { text: said.lookHelp(isLookWanted ? await lookKept($) : 'off') }
+      return { text: `${said.lookHelp(isLookWanted ? await lookKept($) : 'off')} ${said.lookSeasonHelp(await seasonNow($), (await seasonKept($)) !== 'auto')}` }
     }
     if (verb === 'pictures' || verb === 'picture' || verb === '그림' || verb === '絵') {
       const found = await keepPictures($)
@@ -2429,7 +2456,7 @@ export const register: Register = (on, options) => {
     const { Svg } = $.ui.resolve(e)
 
     // The drawn meadow, for an engine that takes no painting as the ground.
-    return <Svg source={scene} alt="A pastel meadow: clouds drift, grass and flowers sway, and stars twinkle at night" isInteractive />
+    return <Svg source={scene} alt="A pastel meadow in its season: clouds drift, grass and flowers sway, and stars twinkle at night" isInteractive />
   })
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {

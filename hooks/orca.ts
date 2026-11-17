@@ -1147,13 +1147,13 @@ const scan = (statements: readonly Statement[], shell: Shell, home: string | und
   /** A launch whose end is not the command's own: one read in a loop's round, or in a command run to make a word. */
   const within = ({ ownsExit: _ownsExit, ...run }: FleetRun): FleetRun => run
 
-  /** For each statement, whether it and all after it are lines of no word but a `}`, none piped on or left behind: read once, from the end. */
+  /** For each statement, whether it and all after it are lines of no word but a `}`, none a redirection alone (`; > file` exits as the redirection does), none piped on or left behind: read once, from the end. */
   const alone: boolean[] = []
 
   for (let at = statements.length - 1; at >= 0; at -= 1) {
     const one = statements[at]
 
-    alone[at] = (alone[at + 1] ?? true) && one !== undefined && isBare(one) && !UNWAITED.has(one.after)
+    alone[at] = (alone[at + 1] ?? true) && one !== undefined && isBare(one) && !(one.words.length === 0 && one.isRedirected === true) && !UNWAITED.has(one.after)
   }
   for (const [index, { words, before, after, isOdd, isRedirected, asides }] of statements.entries()) {
     if (index < skip) continue
